@@ -29,7 +29,7 @@ MAX_GROUPS = 50
 QUARTILES_ABOVE = 20         # numeric columns with more distinct values are binned
 GAP = 0.10                   # relative gap that flags a group
 FAIR_GAP = 0.10              # absolute gap in a rate between groups that flags them
-FOUR_FIFTHS = 0.8            # a group predicted positive at under 80% of the top rate
+FOUR_FIFTHS = 0.8            # a group predicted a class at under 80% of the rate (or over 1/0.8)
 HIGHER_IS_BETTER = ("accuracy", "balanced_accuracy", "f1", "macro_f1", "roc_auc", "r2",
                     "precision", "recall", "mcc", "ccc")
 PRIMARY = ("accuracy", "balanced_accuracy", "f1", "macro_f1", "mae", "rmse", "r2")
@@ -327,12 +327,20 @@ def _rates(groups: list[dict], kind: str, i: int) -> list[tuple[float, str]]:
             if g["rates"][kind][i] is not None]
 
 
+def _overall(whole: dict, kind: str, i: int, rows: list[tuple[float, str]]) -> float:
+    """A rate over all test rows, or the groups' mean when the run didn't record it."""
+    values = whole.get(kind) or []
+    if i < len(values) and values[i] is not None:
+        return values[i]
+    return sum(v for v, _ in rows) / len(rows)
+
+
 def fairness(raw: dict) -> dict | None:
     """Gaps in predicted-class and error rates between groups with enough rows: the
-    largest over the classes. A group is flagged when it gets a class at under four
-    fifths of the highest group's rate (by at least half of FAIR_GAP), or its
-    true-positive rate is FAIR_GAP or more below all test rows' (or its false-positive
-    rate that much above)."""
+    largest over the classes. Each group is compared with all test rows: it is flagged
+    when it gets a class FAIR_GAP more or less often and outside four fifths of the
+    overall rate, or its true-positive rate is FAIR_GAP or more below the overall one
+    (or its false-positive rate that much above)."""
     classes = raw.get("classes")
     overall = raw.get("overall", {})
     enough = max(10, int(0.02 * overall.get("count", 0)))
@@ -353,8 +361,9 @@ def fairness(raw: dict) -> dict | None:
                 out["worst"]["parity"] = name
             out["parity_gap"] = max(out["parity_gap"], gap)
             out["parity_ratio"] = min(out["parity_ratio"], ratio)
-            flagged |= {g for v, g in selection if top and v / top < FOUR_FIFTHS
-                        and top - v >= FAIR_GAP / 2}
+            base = _overall(whole, "selection", i, selection)
+            flagged |= {g for v, g in selection if abs(v - base) >= FAIR_GAP
+                        and min(v, base) < FOUR_FIFTHS * max(v, base)}
         for kind, rows, sign in (("tpr", tpr, -1), ("fpr", fpr, 1)):
             if len(rows) < 2:
                 continue
@@ -363,9 +372,7 @@ def fairness(raw: dict) -> dict | None:
                 out["worst"]["odds"] = (f"the {'true' if kind == 'tpr' else 'false'}-positive "
                                         f"rate{'' if len(classes) == 1 else f' of {name}'}")
             out["odds_gap"] = max(out["odds_gap"], gap)
-            values = whole.get(kind) or []
-            base = values[i] if i < len(values) and values[i] is not None else \
-                sum(v for v, _ in rows) / len(rows)
+            base = _overall(whole, kind, i, rows)
             flagged |= {g for v, g in rows if sign * (v - base) >= FAIR_GAP}
     out["flagged"] = sorted(flagged)
     out["summary"] = _fairness_text(out)
