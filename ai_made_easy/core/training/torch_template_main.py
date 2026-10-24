@@ -44,6 +44,9 @@ def save_calibration(train_loader: DataLoader, test_loader: DataLoader) -> None:
 
 
 def main() -> None:
+    if GPUS > 1 and WORLD == 1:
+        train_together(GPUS)
+        return
     torch.manual_seed(SEED)
     np.random.seed(SEED)
 {% if spec.trainer.deterministic %}
@@ -69,7 +72,12 @@ def main() -> None:
     if PREPARE_HOOK is not None:
         model = PREPARE_HOOK(model)
     print(f"parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    if CHECKPOINTING:
+        print(f"gradient checkpointing: {checkpoint_layers(model)} layers recompute their "
+              "activations")
     model, loss_fn = fit(model, train_loader, val_loader, device)
+    if RANK:   # the first process saves and reports
+        return
     if BEFORE_SAVE is not None:
         BEFORE_SAVE(model)
     torch.save(model.state_dict(), CHECKPOINT)

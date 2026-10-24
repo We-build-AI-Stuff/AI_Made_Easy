@@ -1017,9 +1017,18 @@ TRAINER = Component(
             "(e.g. 0.999); 0 = off"),
      P("swa_start", "int", 0, lo=0,
        help="Stochastic weight averaging: average the weights of every epoch from this "
-            "one on (PyTorch); 0 = off")),
+            "one on (PyTorch); 0 = off"),
+     P("compile", "bool", False,
+       help="Compile the model with torch.compile: faster steps after a slower first one. "
+            "If compiling fails the run says why and trains without it (PyTorch)"),
+     P("gradient_checkpointing", "bool", False,
+       help="Recompute each layer's activations in the backward pass instead of keeping "
+            "them: less memory for about a third more compute (PyTorch)"),
+     P("gpus", "int", 1, lo=1, hi=64,
+       help="GPUs of one machine that train together (DistributedDataParallel); the "
+            "batch size is per GPU (PyTorch)")),
     desc="Training loop: epochs, batching, device, early stopping, clipping, AMP, "
-         "weight averaging (EMA or SWA).",
+         "weight averaging (EMA or SWA), compiling, gradient checkpointing, several GPUs.",
     checks=lambda p: ([("error", "use one kind of weight averaging: EMA or SWA")]
                       if float(p.get("ema_decay") or 0) and int(p.get("swa_start") or 0)
                       else []) + ([("warning", "SWA starts after the last epoch, so it never "

@@ -109,6 +109,11 @@ Host runpod
 On machines without the packages you need, set `install=true`, or `docker_image`
 (for example `pytorch/pytorch:latest`).
 
+A machine with several GPUs trains on them together when the Trainer's **GPUs** is more
+than one (PyTorch, DistributedDataParallel; the batch size is per GPU). It uses as many
+as the machine has, up to that number. **Compile** (`torch.compile`) and **Gradient
+checkpointing** (less memory, about a third more compute) are on the Trainer too.
+
 ## Kaggle
 
 ```bash
