@@ -125,6 +125,9 @@ export function GroupsModal({ run, onClose }: { run: RunRecord; onClose: () => v
                 </tr>))}
             </tbody>
           </table>
+          {result.fairness && (
+            <p data-testid="fairness"><b className={result.fairness.flagged.length ? "sev-warning" : ""}>
+              Fairness:</b> {result.fairness.summary}</p>)}
         </div>)}
     </Modal>
   );

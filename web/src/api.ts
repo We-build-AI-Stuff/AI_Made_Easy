@@ -93,7 +93,8 @@ export const api = {
   tasks: () => get<{ tasks: TaskInfo[] }>("/tasks"),
   families: () => get<{ families: FamilyInfo[] }>("/families"),
   describe: (graph: Project) =>
-    post<{ family: FamilyInfo; task: TaskInfo | null }>("/describe", { graph }),
+    post<{ family: FamilyInfo; task: TaskInfo | null; frameworks: string[];
+           framework: string | null }>("/describe", { graph }),
   sample: (name: string) => get<Project>(`/samples/${encodeURIComponent(name)}`),
 
   validate: (graph: Project) => post<Validation>("/validate", { graph }),

@@ -19,7 +19,7 @@ boilerplate. It runs on the desktop or in the browser.
   it in **Run on**; live curves, Stop, sweeps and pipelines work the same, and a dropped
   connection picks up where it left off. Sign-in stays with each tool: AI Made Easy never
   asks for a password, token or key ([docs/REMOTE.md](docs/REMOTE.md)).
-- **Export everywhere:** ONNX, TorchScript, Core ML, ExecuTorch and LiteRT, with int8
+- **Export everywhere:** ONNX, TorchScript, Core ML, OpenVINO, ExecuTorch and LiteRT, with int8
   quantization calibrated on the run's own samples. Every export is checked against the
   trained model before it is packaged. Detectors keep their post-processing (NMS) and
   graph networks take graphs of any size. The project's budget device suggests the
@@ -223,6 +223,7 @@ Install only what you need with the optional extras:
 | `export` | ONNX / onnxruntime / skl2onnx exports and verification |
 | `edge` | On-device exports: ExecuTorch (`.pte`) and the LiteRT interpreter |
 | `coreml` | Core ML exports (`.mlpackage`), checked against PyTorch when exported on a Mac |
+| `openvino` | OpenVINO exports (Intel CPUs, GPUs and NPUs), checked against PyTorch on the CPU |
 | `tracking` | Mirror runs to MLflow and Weights & Biases |
 | `hub` | The Hugging Face Hub: push runs and Spaces, load Hub datasets |
 | `kaggle` / `modal` | Train on Kaggle / Modal; Kaggle datasets and competitions |

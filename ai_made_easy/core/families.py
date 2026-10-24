@@ -101,12 +101,17 @@ def family_of(graph) -> Family:  # noqa: ANN001 — Graph or project dict
 
 
 def resolve_framework(graph, framework: str = "auto") -> str:  # noqa: ANN001
-    """The framework that trains ``graph``; validates an explicit choice."""
+    """The framework that trains ``graph``; validates an explicit choice. "auto" takes
+    the design's own choice (``meta["framework"]``, set in either app) when its family
+    trains with it."""
     family = family_of(graph)
     if not family.trainable or not family.frameworks:
         raise ValueError(f"{family.label} projects are not trained in the app; "
                          "export their script instead")
     if framework == "auto":
+        chosen = (getattr(graph, "meta", None) or {}).get("framework")
+        if chosen in family.frameworks:
+            return chosen
         return family.choose(graph) if family.choose is not None else family.frameworks[0]
     if framework not in family.frameworks:
         raise ValueError(f"{family.label} projects train with "

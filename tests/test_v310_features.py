@@ -6,6 +6,7 @@ import time
 
 import pytest
 from test_backends import fake_ssh  # noqa: F401 — fixture
+from conftest import tiny_classifier_dict
 from test_v39_features import _resumable_design, _run
 
 from ai_made_easy.core import api, resume
@@ -221,3 +222,106 @@ def test_checkpointing_lowers_the_memory_estimate():
     assert after.checkpointing and after.train_memory_bytes() <= before.train_memory_bytes()
     device = budget.get_device("rtx_3060")
     assert after.step_time_ms(device) == pytest.approx(before.step_time_ms(device) * 4 / 3)
+
+
+# ------------------------------------------------------------ Phase 2: fairness by group
+def test_fairness_measures_gaps_between_groups():
+    from ai_made_easy.core import groups
+
+    def group(value, count, selection, tpr, fpr):
+        return {"value": value, "count": count,
+                "rates": {"selection": [selection], "tpr": [tpr], "fpr": [fpr]}}
+
+    raw = {"classes": ["yes"], "overall": {"count": 300},
+           "groups": [group("a", 100, 0.50, 0.90, 0.10), group("b", 100, 0.30, 0.88, 0.12),
+                      group("c", 100, 0.48, 0.70, 0.11), group("tiny", 3, 0.0, 0.0, 0.9)]}
+    out = groups.fairness(raw)
+    assert out["parity_gap"] == pytest.approx(0.20) and out["parity_ratio"] == pytest.approx(0.6)
+    assert out["odds_gap"] == pytest.approx(0.20) and out["worst"]["odds"].startswith("yes")
+    assert out["flagged"] == ["b", "c"]            # b: parity, c: true positives; not tiny
+    assert out["summary"].endswith("Treated differently: b, c.")
+    assert "under the four-fifths rule" in out["summary"]
+    assert groups.fairness({"classes": None, "groups": []}) is None
+
+
+@pytest.mark.slow
+def test_a_classifier_gets_fairness_by_group(isolated_home, tmp_path):
+    pytest.importorskip("torch")
+    from test_v38_features import _network, _region_table
+
+    from ai_made_easy.core import groups
+
+    mgr = RunManager(RunHistory(tmp_path / "runs"))
+    api.set_manager(mgr)
+    try:
+        run_id = api.start_training(_network(_region_table(tmp_path / "t.csv")))["run_id"]
+        assert mgr.wait(run_id, 600)["state"] == "finished"
+        scoring = api.results_by_group(run_id, "region")["run_id"]
+        assert mgr.wait(scoring, 600)["state"] == "finished"
+        fair = api.group_result(scoring)["fairness"]
+        # east's labels are noisy: the model is wrong there far more often, in both ways,
+        # while every region is predicted positive about as often (40-odd test rows each)
+        assert fair["classes"] == ["1"] and fair["flagged"] == ["east"]
+        assert fair["odds_gap"] >= 0.2 and fair["parity_gap"] < 0.25
+        assert fair["parity_ratio"] >= groups.FOUR_FIFTHS * 0.9
+    finally:
+        api.set_manager(None)
+
+
+@pytest.mark.slow
+def test_a_classic_classifier_gets_fairness_by_group(isolated_home, tmp_path):
+    pytest.importorskip("sklearn")
+    from test_v38_features import _region_table
+
+    from ai_made_easy.core import recipes
+
+    mgr = RunManager(RunHistory(tmp_path / "runs"))
+    api.set_manager(mgr)
+    try:
+        facts = recipes.detect(_region_table(tmp_path / "t.csv"))
+        run_id = mgr.start(recipes.build("random_forest", facts.task, facts,
+                                         {"n_estimators": 50}))
+        assert mgr.wait(run_id, 600)["state"] == "finished"
+        scoring = api.results_by_group(run_id, "region")["run_id"]
+        assert mgr.wait(scoring, 600)["state"] == "finished"
+        fair = api.group_result(scoring)["fairness"]
+        assert fair["classes"] == ["1"] and "east" in fair["flagged"]
+    finally:
+        api.set_manager(None)
+
+
+# ------------------------------------------------------------ Phase 2: choosing Keras
+def test_a_design_trains_with_the_framework_it_chose():
+    from ai_made_easy.core.families import resolve_framework
+
+    graph = tiny_classifier_dict()
+    described = api.describe_design(graph)
+    assert described["frameworks"] == ["pytorch", "keras"]
+    assert described["framework"] == "pytorch"
+    graph["meta"] = {"framework": "keras"}
+    assert api.describe_design(graph)["framework"] == "keras"
+    assert resolve_framework(Graph.from_dict(graph)) == "keras"
+    assert resolve_framework(Graph.from_dict(graph), "pytorch") == "pytorch"  # explicit wins
+    graph["meta"] = {"framework": "sklearn"}          # not this family's: ignored
+    assert resolve_framework(Graph.from_dict(graph)) == "pytorch"
+    pytorch_only = tiny_classifier_dict()
+    pytorch_only["nodes"].insert(2, {"id": "x", "type": "vision.deform_conv2d", "params": {},
+                                     "position": [0, 0]})
+    assert api.describe_design(pytorch_only)["frameworks"] == ["pytorch"]
+
+
+@pytest.mark.slow
+def test_the_finder_follows_a_design_that_chose_keras(isolated_home, tmp_path):
+    pytest.importorskip("keras")
+    mgr = RunManager(RunHistory(tmp_path / "runs"))
+    api.set_manager(mgr)
+    try:
+        graph = tiny_classifier_dict()
+        graph["meta"] = {"framework": "keras"}
+        run_id = api.find_learning_rate(graph, steps=20)["run_id"]      # framework: auto
+        assert mgr.wait(run_id, 600)["state"] == "finished", mgr.history.get(run_id).error
+        assert mgr.history.get(run_id).framework == "keras"
+        assert api.learning_rate_result(run_id)["suggested"]
+        assert not any((mgr.history.path(run_id) / n).exists() for n in RESUME_FILES)
+    finally:
+        api.set_manager(None)

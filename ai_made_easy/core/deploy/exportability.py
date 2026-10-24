@@ -44,13 +44,13 @@ _BLOCKS = {
     "audio.mfcc": Blocker(ON_DEVICE, "the MFCC front end uses a complex STFT, which "
                                      "ExecuTorch can't lower: export to ONNX, or compute "
                                      "features before the model"),
-    "flow.invconv1x1": Blocker(("coreml",), "the invertible 1x1 convolution builds its weight "
-                               "with diag, which Core ML can't convert: export to ONNX or "
-                               "ExecuTorch"),
-    "flow.spline_coupling": Blocker((*ON_DEVICE, "coreml"), "the spline is evaluated only "
-                                    "where inputs fall inside its bounds (data-dependent "
-                                    "shapes), which ExecuTorch and Core ML can't follow: "
-                                    "export to ONNX"),
+    "flow.invconv1x1": Blocker(("coreml", "openvino"), "the invertible 1x1 convolution builds "
+                               "its weight with diag, which Core ML and OpenVINO can't "
+                               "convert: export to ONNX or ExecuTorch"),
+    "flow.spline_coupling": Blocker((*ON_DEVICE, "coreml", "openvino"), "the spline is "
+                                    "evaluated only where inputs fall inside its bounds "
+                                    "(data-dependent shapes), which ExecuTorch, Core ML and "
+                                    "OpenVINO can't follow: export to ONNX"),
     "tab.ft_transformer": Blocker(("executorch_int8",), "categorical embeddings read ids "
                                                         "from the float input row, and the "
                                                         "int8 quantizer can't follow that "
@@ -64,9 +64,9 @@ _BLOCKS = {
     "seq.rwkv_block": Blocker(ON_DEVICE, "the RWKV recurrence runs as a loop with running "
                               "maxima that the ExecuTorch runtime rejects: export to ONNX or "
                               "TorchScript"),
-    "seq.hyena": Blocker((*ON_DEVICE, "coreml"), "the Hyena long convolution uses FFTs "
-                         "(complex numbers), which ExecuTorch and Core ML can't run: export "
-                         "to ONNX or TorchScript"),
+    "seq.hyena": Blocker((*ON_DEVICE, "coreml", "openvino"), "the Hyena long convolution "
+                         "uses FFTs (complex numbers), which ExecuTorch, Core ML and "
+                         "OpenVINO's CPU runtime can't run: export to ONNX or TorchScript"),
     "vision.deform_conv2d": Blocker(("onnx", "onnx_int8", *ON_DEVICE, "coreml"), "deformable "
                                     "convolution is a torchvision operator that only "
                                     "TorchScript can carry"),
@@ -77,6 +77,8 @@ _BLOCKS = {
     "graph.topk_pool": Blocker(("onnx", "onnx_int8"), _POOL),
     "graph.sag_pool": Blocker(("onnx", "onnx_int8"), _POOL),
 }
+_OPENVINO_ONE_TENSOR = Blocker(("openvino",), "OpenVINO export takes models with one input "
+                               "tensor: export to ONNX, which OpenVINO also reads")
 # trainer kinds -> what they stop
 _KINDS = {
     "detection": Blocker(FIXED_SHAPE, "detectors keep their post-processing (NMS), whose "
@@ -127,8 +129,10 @@ def blockers(graph, framework: str | None = None) -> dict[str, tuple[str, str | 
         return {}
     out: dict[str, tuple[str, str | None]] = {}
     task = _task(graph)
-    kind = _KINDS.get(task.trainer_kind) if task is not None else None
-    if kind is not None:
+    kinds = [_KINDS.get(task.trainer_kind)] if task is not None else []
+    if task is not None and task.trainer_kind in ("detection", "graph"):
+        kinds.append(_OPENVINO_ONE_TENSOR)
+    for kind in filter(None, kinds):
         for fmt in kind.formats:
             out.setdefault(fmt, (kind.reason, None))
     for node in graph.nodes.values():

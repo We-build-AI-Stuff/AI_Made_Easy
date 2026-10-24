@@ -1,6 +1,6 @@
 """Model exporters, each checked against the model it came from.
 
-PyTorch: ONNX, ONNX int8, TorchScript, Core ML, ExecuTorch and ExecuTorch int8.
+PyTorch: ONNX, ONNX int8, TorchScript, Core ML, OpenVINO, ExecuTorch and ExecuTorch int8.
 Keras: ONNX, TensorFlow SavedModel, LiteRT and LiteRT int8. scikit-learn: ONNX.
 
 This file is copied into every serving package (next to ``export_formats.py``) and the
@@ -43,20 +43,21 @@ DETECTION_MATCH = 0.9       # float detector exports: share of detections that m
 INT8_FORMATS = ("onnx_int8", "executorch_int8", "litert_int8")
 ALIASES = {"tflite": "litert"}
 FORMATS = {
-    "pytorch": ("onnx", "onnx_int8", "torchscript", "coreml", "executorch",
+    "pytorch": ("onnx", "onnx_int8", "torchscript", "coreml", "openvino", "executorch",
                 "executorch_int8"),
     "keras": ("onnx", "saved_model", "litert", "litert_int8"),
     "sklearn": ("onnx",),
 }
 LABELS = {
     "onnx": "ONNX", "onnx_int8": "ONNX (int8 quantized)", "torchscript": "TorchScript",
-    "coreml": "Core ML", "executorch": "ExecuTorch (.pte)",
+    "coreml": "Core ML", "openvino": "OpenVINO (IR: .xml + .bin)",
+    "executorch": "ExecuTorch (.pte)",
     "executorch_int8": "ExecuTorch int8 (.pte, XNNPACK)",
     "saved_model": "TensorFlow SavedModel", "litert": "LiteRT (.tflite)",
     "litert_int8": "LiteRT int8 (.tflite)",
 }
 SHORT = {"onnx": "ONNX", "onnx_int8": "ONNX int8", "torchscript": "TorchScript",
-         "coreml": "Core ML", "executorch": "ExecuTorch", "executorch_int8": "ExecuTorch int8",
+         "coreml": "Core ML", "openvino": "OpenVINO", "executorch": "ExecuTorch", "executorch_int8": "ExecuTorch int8",
          "saved_model": "SavedModel", "litert": "LiteRT", "litert_int8": "LiteRT int8"}
 _SOURCE = {"pytorch": "PyTorch", "keras": "Keras", "sklearn": "scikit-learn"}
 _MAX_CASES = 16          # inputs every export is checked on
@@ -472,7 +473,9 @@ class Exporter:
             onnx.append(lambda: self.torch_onnx(1, False))
             script.append(lambda: self.torchscript(1))
         return {"onnx": onnx, "onnx_int8": self.torch_onnx_int8, "torchscript": script,
-                "coreml": self.coreml, "executorch": lambda: self.executorch(False),
+                "coreml": self.coreml,
+                "openvino": [lambda: self.openvino(2), lambda: self.openvino(1)],
+                "executorch": lambda: self.executorch(False),
                 "executorch_int8": lambda: self.executorch(True)}
 
     def _tensors(self, case: tuple) -> tuple:
@@ -592,6 +595,31 @@ class Exporter:
             return converted.predict(dict(zip(names, arrays, strict=True)))[output]
 
         return path, run, "float16, as on Apple devices"
+
+    def openvino(self, batch: int = 2) -> tuple:
+        """OpenVINO's IR (a folder: ``model.xml`` and its weights ``model.bin``), any
+        batch size (1 when tracing fixed it), run on this computer's CPU to check it."""
+        if self.kind != "tensor":
+            raise Skipped("OpenVINO export is for single-tensor models; use ONNX")
+        import openvino as ov
+        import torch
+
+        example = self._tensors(self.samples.example(batch))
+        folder = self.out / "model.openvino"
+        folder.mkdir(exist_ok=True)
+        with torch.no_grad(), _plain_attention():
+            converted = ov.convert_model(self.model, example_input=example[0]
+                                         if len(example) == 1 else example)
+        ov.save_model(converted, str(folder / "model.xml"), compress_to_fp16=False)
+        # float32 (ARM CPUs would compute in float16 by default)
+        compiled = ov.Core().compile_model(str(folder / "model.xml"), "CPU",
+                                           {"INFERENCE_PRECISION_HINT": "f32"})
+
+        def run(case: tuple) -> np.ndarray:
+            return np.asarray(compiled([np.ascontiguousarray(a) for a in case])[0])
+
+        return folder, run, "float32, on this computer's CPU" + (
+            "; batch size 1 (the model fixes its batch size)" if batch == 1 else "")
 
     def executorch(self, int8: bool) -> tuple:
         if self.kind == "graph":

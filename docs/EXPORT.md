@@ -5,7 +5,7 @@ against the trained model** before it lands in the serving package:
 
 | Framework | Formats |
 | --- | --- |
-| PyTorch | ONNX, ONNX int8, TorchScript, Core ML, ExecuTorch (`.pte`), ExecuTorch int8 |
+| PyTorch | ONNX, ONNX int8, TorchScript, Core ML, OpenVINO, ExecuTorch (`.pte`), ExecuTorch int8 |
 | Keras | ONNX, TensorFlow SavedModel, LiteRT (`.tflite`), LiteRT int8 |
 | scikit-learn | ONNX |
 
@@ -67,6 +67,10 @@ pip install tensorflow                  # Keras -> LiteRT
   is installed, the package converts in a TensorFlow-backend process, which reads the
   same `.keras` file. The old name `tflite` still works.
 - **Core ML** (PyTorch): for Apple devices. It isn't checked on the build machine.
+- **OpenVINO** (PyTorch, the `openvino` extra): Intel's runtime for its CPUs, GPUs and
+  NPUs. The export is a folder `model.openvino/` with `model.xml` and its weights
+  `model.bin`, takes any batch size and is checked against PyTorch on this computer's
+  CPU in float32. Models with one input tensor; OpenVINO also reads the ONNX export.
 
 ## Detectors and graph networks
 
@@ -111,13 +115,15 @@ rules:
 
 | Design | Can't export to | Why |
 | --- | --- | --- |
-| Detectors | ExecuTorch, Core ML | NMS gives a different number of boxes per image; fixed-shape runtimes can't follow it |
-| Graph networks | ExecuTorch, Core ML | nodes and edges vary per request |
+| Detectors | ExecuTorch, Core ML, OpenVINO | NMS gives a different number of boxes per image; fixed-shape runtimes can't follow it |
+| Graph networks | ExecuTorch, Core ML, OpenVINO | nodes and edges vary per request |
 | TopK / SAG pooling | ONNX | an in-place sort the ONNX exporter can't follow (TorchScript works) |
 | Bayesian layers | ExecuTorch, Core ML | random weight sampling at inference (ONNX keeps it) |
 | Mel spectrogram / MFCC | ExecuTorch | complex STFT |
 | DLRM | ExecuTorch | `triu_indices` has no ExecuTorch kernel |
-| Spline coupling (flows) | ExecuTorch | data-dependent shapes |
+| Spline coupling (flows) | ExecuTorch, Core ML, OpenVINO | data-dependent shapes |
+| Glow's invertible 1x1 convolution | Core ML, OpenVINO | `diag` has no converter |
+| Hyena | ExecuTorch, Core ML, OpenVINO | FFTs (complex numbers) |
 | Seq2seq transformer | ExecuTorch | token-by-token decoding loop |
 | FT-Transformer | ExecuTorch int8 | categorical ids read from the float row |
 | Mask2Former | ExecuTorch int8 | integer index tensors |

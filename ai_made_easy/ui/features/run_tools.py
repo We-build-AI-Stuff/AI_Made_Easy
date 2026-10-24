@@ -181,6 +181,10 @@ class GroupsDialog(QtWidgets.QDialog):
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAccessibleName("Results by group")
         layout.addWidget(self.table, 1)
+        self.fairness = QtWidgets.QLabel("")
+        self.fairness.setWordWrap(True)
+        self.fairness.setAccessibleName("Fairness between groups")
+        layout.addWidget(self.fairness)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -235,6 +239,8 @@ class GroupsDialog(QtWidgets.QDialog):
             f"{'lower' if result.get('higher_is_better') else 'higher'} {key} than the whole "
             "test set." if flagged else f"No group is clearly worse than the whole test set "
                                         f"on {key}.")
+        fair = result.get("fairness")
+        self.fairness.setText(f"Fairness: {fair['summary']}" if fair else "")
         self.table.setHorizontalHeaderLabels([result.get("column", "Group"), "Rows", key,
                                               "vs all"])
         rows = [{"value": "all test rows", **result.get("overall", {})}, *result["groups"]]

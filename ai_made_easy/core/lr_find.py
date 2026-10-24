@@ -137,6 +137,8 @@ module.BATCH_HOOK = after_batch
 module.LR_SCALE = 1.0
 module.EPOCHS = 10_000         # as many passes as the steps need
 module.EARLY_STOP = 0
+module.RESUME_FILE = ""        # a range test has nothing to resume
+module.GPUS = 1                # one process: the hooks follow its batches
 '''
 
 _KERAS_DRIVE = '''import keras
@@ -163,6 +165,7 @@ module = load_module({script!r}, "lr_find_model")
 module.CALLBACKS = [Finder()]
 module.EPOCHS = 10_000         # as many passes as the steps need
 module.EARLY_STOP = 0
+module.RESUME_FILE = ""        # a range test has nothing to resume
 '''
 
 

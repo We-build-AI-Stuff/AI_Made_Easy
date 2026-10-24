@@ -107,6 +107,16 @@ def test_groups_dialog_shows_flagged_groups(ctx, app):
     east = dialog.table.item(1, 3)
     assert "worse" in east.text() and east.font().bold()
     assert not dialog.table.item(2, 0).font().bold()
+    assert dialog.fairness.text() == ""                  # no classes: no fairness check
+    result["fairness"] = groups.fairness({
+        "classes": ["1"], "overall": {"count": 300},
+        "groups": [{"value": "east", "count": 100,
+                    "rates": {"selection": [0.2], "tpr": [0.6], "fpr": [0.3]}},
+                   {"value": "north", "count": 200,
+                    "rates": {"selection": [0.5], "tpr": [0.9], "fpr": [0.1]}}]})
+    dialog.show_result(result)
+    assert "under the four-fifths rule" in dialog.fairness.text()
+    assert "Treated differently: east." in dialog.fairness.text()
     dialog.close()
 
 
