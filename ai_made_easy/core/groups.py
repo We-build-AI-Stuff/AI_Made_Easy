@@ -8,8 +8,10 @@ good on average but poor for some customers shows it.
 For classifiers it also checks fairness between the groups (3.10): how often each group
 gets each predicted class (demographic parity: the gap between the highest and lowest
 rate, and their ratio against the four-fifths rule) and how often the model is right and
-wrong for each (equalized odds: the largest gap in true- or false-positive rates). Groups
-whose rates stand out from the others are flagged.
+wrong for each (equalized odds: the largest gap in true- or false-positive rates). A
+group is flagged when it gets a class at under four fifths of the highest group's rate,
+or the model misses its positives or raises false alarms clearly more often than on all
+test rows.
 
 A stage script recovers the exact test rows: it imports the run's training script,
 records the rows its split picked, predicts them with the run's saved model and reads
@@ -101,10 +103,10 @@ def rates(pred, truth, classes):
     return out
 
 
-def write(overall, groups, how, classes=None):
+def write(overall, groups, how, classes=None, overall_rates=None):
     Path("groups.json").write_text(json.dumps(
         {{"column": COLUMN, "how": how, "overall": overall, "groups": groups,
-          "classes": classes}}, indent=1),
+          "classes": classes, "overall_rates": overall_rates}}, indent=1),
         encoding="utf-8")
     print(f"groups: {{len(groups)}} groups of {{COLUMN!r}} ({{how}})")
 '''
@@ -149,7 +151,7 @@ def score(mask):
 overall = {{"count": int(len(rows)), **score(np.ones(len(rows), bool))}}
 groups = [{{"value": str(v), "count": int((labels == v).sum()), **score(labels == v)}}
           for v in sorted(set(labels))]
-classes = None
+classes = overall_rates = None
 if hasattr(module, "NUM_CLASSES") and np.ndim(targets) == 1:   # not multi-label
     scores = module.to_scores(outputs)
     if scores.ndim == 2 and scores.shape[1] > 1:
@@ -161,10 +163,11 @@ if hasattr(module, "NUM_CLASSES") and np.ndim(targets) == 1:   # not multi-label
     for group in groups:
         mask = labels == group["value"]
         group["rates"] = rates(pred[mask], truth[mask], classes)
+    overall_rates = rates(pred, truth, classes)
     names = getattr(module, "CLASS_NAMES", None)
     classes = [str(names[c]) if names is not None and c < len(names) else str(c)
                for c in classes]
-write(overall, groups, how, classes)
+write(overall, groups, how, classes, overall_rates if classes else None)
 '''
 
 _CLASSIC = '''
@@ -192,7 +195,7 @@ def score(mask):
 overall = {{"count": int(len(X_test)), **score(np.ones(len(X_test), bool))}}
 groups = [{{"value": str(v), "count": int((labels == v).sum()), **score(labels == v)}}
           for v in sorted(set(labels))]
-classes = None
+classes = overall_rates = None
 known = getattr(model, "classes_", None)
 if known is not None and np.ndim(y_test) == 1:
     known = list(known)
@@ -201,8 +204,9 @@ if known is not None and np.ndim(y_test) == 1:
     for group in groups:
         mask = labels == group["value"]
         group["rates"] = rates(pred[mask], truth[mask], picked)
+    overall_rates = rates(pred, truth, picked)
     classes = [str(c) for c in picked]
-write(overall, groups, how, classes)
+write(overall, groups, how, classes, overall_rates)
 '''
 
 
@@ -326,14 +330,16 @@ def _rates(groups: list[dict], kind: str, i: int) -> list[tuple[float, str]]:
 def fairness(raw: dict) -> dict | None:
     """Gaps in predicted-class and error rates between groups with enough rows: the
     largest over the classes. A group is flagged when it gets a class at under four
-    fifths of the highest group's rate, or its true- or false-positive rate is
-    FAIR_GAP or more away from the best group's."""
+    fifths of the highest group's rate (by at least half of FAIR_GAP), or its
+    true-positive rate is FAIR_GAP or more below all test rows' (or its false-positive
+    rate that much above)."""
     classes = raw.get("classes")
     overall = raw.get("overall", {})
     enough = max(10, int(0.02 * overall.get("count", 0)))
     groups = [g for g in raw.get("groups", []) if g.get("rates") and g["count"] >= enough]
     if not classes or len(groups) < 2:
         return None
+    whole = raw.get("overall_rates") or {}
     out = {"classes": classes, "parity_gap": 0.0, "parity_ratio": 1.0, "odds_gap": 0.0,
            "worst": {}, "flagged": []}
     flagged: set[str] = set()
@@ -349,15 +355,18 @@ def fairness(raw: dict) -> dict | None:
             out["parity_ratio"] = min(out["parity_ratio"], ratio)
             flagged |= {g for v, g in selection if top and v / top < FOUR_FIFTHS
                         and top - v >= FAIR_GAP / 2}
-        for kind, rows, best in (("tpr", tpr, max), ("fpr", fpr, min)):
+        for kind, rows, sign in (("tpr", tpr, -1), ("fpr", fpr, 1)):
             if len(rows) < 2:
                 continue
             gap = max(v for v, _ in rows) - min(v for v, _ in rows)
             if gap > out["odds_gap"]:
-                out["worst"]["odds"] = f"{name} ({'true' if kind == 'tpr' else 'false'} positives)"
+                out["worst"]["odds"] = (f"the {'true' if kind == 'tpr' else 'false'}-positive "
+                                        f"rate{'' if len(classes) == 1 else f' of {name}'}")
             out["odds_gap"] = max(out["odds_gap"], gap)
-            target = best(v for v, _ in rows)
-            flagged |= {g for v, g in rows if abs(v - target) >= FAIR_GAP}
+            values = whole.get(kind) or []
+            base = values[i] if i < len(values) and values[i] is not None else \
+                sum(v for v, _ in rows) / len(rows)
+            flagged |= {g for v, g in rows if sign * (v - base) >= FAIR_GAP}
     out["flagged"] = sorted(flagged)
     out["summary"] = _fairness_text(out)
     return out
@@ -365,9 +374,10 @@ def fairness(raw: dict) -> dict | None:
 
 def _fairness_text(f: dict) -> str:
     """One paragraph both apps show."""
-    parity = (f"Predicted {f['worst'].get('parity', f['classes'][0])}: rates differ by up "
-              f"to {f['parity_gap']:.0%} between groups (lowest/highest "
-              f"{f['parity_ratio']:.2f}{', under the four-fifths rule' if f['parity_ratio'] < FOUR_FIFTHS else ''}).")
+    which = f["worst"].get("parity", f["classes"][0])
+    four_fifths = ", under the four-fifths rule" if f["parity_ratio"] < FOUR_FIFTHS else ""
+    parity = (f"How often groups are predicted {which} differs by up to "
+              f"{f['parity_gap']:.0%} (lowest/highest {f['parity_ratio']:.2f}{four_fifths}).")
     odds = (f"Error rates differ by up to {f['odds_gap']:.0%}"
             + (f" ({f['worst']['odds']})" if "odds" in f["worst"] else "") + ".")
     verdict = (f"Treated differently: {', '.join(f['flagged'])}." if f["flagged"]

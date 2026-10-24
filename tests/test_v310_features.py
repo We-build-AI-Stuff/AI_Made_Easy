@@ -237,7 +237,7 @@ def test_fairness_measures_gaps_between_groups():
                       group("c", 100, 0.48, 0.70, 0.11), group("tiny", 3, 0.0, 0.0, 0.9)]}
     out = groups.fairness(raw)
     assert out["parity_gap"] == pytest.approx(0.20) and out["parity_ratio"] == pytest.approx(0.6)
-    assert out["odds_gap"] == pytest.approx(0.20) and out["worst"]["odds"].startswith("yes")
+    assert out["odds_gap"] == pytest.approx(0.20) and out["worst"]["odds"] == "the true-positive rate"
     assert out["flagged"] == ["b", "c"]            # b: parity, c: true positives; not tiny
     assert out["summary"].endswith("Treated differently: b, c.")
     assert "under the four-fifths rule" in out["summary"]
