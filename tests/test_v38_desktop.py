@@ -110,6 +110,7 @@ def test_groups_dialog_shows_flagged_groups(ctx, app):
     assert dialog.fairness.text() == ""                  # no classes: no fairness check
     result["fairness"] = groups.fairness({
         "classes": ["1"], "overall": {"count": 300},
+        "overall_rates": {"selection": [0.4], "tpr": [0.8], "fpr": [0.17]},
         "groups": [{"value": "east", "count": 100,
                     "rates": {"selection": [0.2], "tpr": [0.6], "fpr": [0.3]}},
                    {"value": "north", "count": 200,
