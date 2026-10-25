@@ -29,6 +29,7 @@ MAX_GROUPS = 50
 QUARTILES_ABOVE = 20         # numeric columns with more distinct values are binned
 GAP = 0.10                   # relative gap that flags a group
 FAIR_GAP = 0.10              # absolute gap in a rate between groups that flags them
+_EXACT = 1e-9                # a gap of exactly FAIR_GAP counts, whatever the rounding
 FOUR_FIFTHS = 0.8            # a group predicted a class at under 80% of the rate (or over 1/0.8)
 HIGHER_IS_BETTER = ("accuracy", "balanced_accuracy", "f1", "macro_f1", "roc_auc", "r2",
                     "precision", "recall", "mcc", "ccc")
@@ -357,12 +358,11 @@ def fairness(raw: dict) -> dict | None:
             top = max(v for v, _ in selection)
             gap = top - min(v for v, _ in selection)
             ratio = min(v for v, _ in selection) / top if top else 1.0
-            if gap > out["parity_gap"]:
+            if gap > out["parity_gap"]:   # the gap and ratio both describe this class
                 out["worst"]["parity"] = name
-            out["parity_gap"] = max(out["parity_gap"], gap)
-            out["parity_ratio"] = min(out["parity_ratio"], ratio)
+                out["parity_gap"], out["parity_ratio"] = gap, ratio
             base = _overall(whole, "selection", i, selection)
-            flagged |= {g for v, g in selection if abs(v - base) >= FAIR_GAP
+            flagged |= {g for v, g in selection if abs(v - base) >= FAIR_GAP - _EXACT
                         and min(v, base) < FOUR_FIFTHS * max(v, base)}
         for kind, rows, sign in (("tpr", tpr, -1), ("fpr", fpr, 1)):
             if len(rows) < 2:
@@ -373,7 +373,7 @@ def fairness(raw: dict) -> dict | None:
                                         f"rate{'' if len(classes) == 1 else f' of {name}'}")
             out["odds_gap"] = max(out["odds_gap"], gap)
             base = _overall(whole, kind, i, rows)
-            flagged |= {g for v, g in rows if sign * (v - base) >= FAIR_GAP}
+            flagged |= {g for v, g in rows if sign * (v - base) >= FAIR_GAP - _EXACT}
     out["flagged"] = sorted(flagged)
     out["summary"] = _fairness_text(out)
     return out

@@ -283,6 +283,25 @@ def test_fairness_measures_gaps_between_groups():
     assert groups.fairness({"classes": None, "groups": []}) is None
 
 
+def test_fairness_ratio_belongs_to_the_named_class_and_exact_gaps_count():
+    from ai_made_easy.core import groups
+
+    def group(value, selection, tpr):
+        return {"value": value, "count": 100,
+                "rates": {"selection": selection, "tpr": tpr, "fpr": [0.1, 0.1]}}
+
+    # class a: the larger gap (0.50 vs 0.20, ratio 0.40); class b: the lower ratio (0.25)
+    raw = {"classes": ["a", "b"], "overall": {"count": 300},
+           "overall_rates": {"selection": [0.3, 0.06], "tpr": [0.9, 0.9], "fpr": [0.1, 0.1]},
+           "groups": [group("x", [0.20, 0.08], [0.9, 0.9]), group("y", [0.50, 0.02], [0.9, 0.9]),
+                      group("z", [0.30, 0.06], [0.8, 0.9])]}
+    out = groups.fairness(raw)
+    assert out["worst"]["parity"] == "a"
+    assert out["parity_gap"] == pytest.approx(0.30) and out["parity_ratio"] == pytest.approx(0.4)
+    # x: exactly 10 points under all rows (0.2 vs 0.3); z: true positives exactly 10 lower
+    assert {"x", "z"} <= set(out["flagged"])
+
+
 @pytest.mark.slow
 def test_a_classifier_gets_fairness_by_group(isolated_home, tmp_path):
     pytest.importorskip("torch")
@@ -347,6 +366,8 @@ def test_a_design_trains_with_the_framework_it_chose():
     pytorch_only["nodes"].insert(2, {"id": "x", "type": "vision.deform_conv2d", "params": {},
                                      "position": [0, 0]})
     assert api.describe_design(pytorch_only)["frameworks"] == ["pytorch"]
+    pytorch_only["meta"] = {"framework": "keras"}     # chosen before the block was added
+    assert resolve_framework(Graph.from_dict(pytorch_only)) == "pytorch"
 
 
 @pytest.mark.slow

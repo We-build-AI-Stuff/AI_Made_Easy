@@ -100,17 +100,31 @@ def family_of(graph) -> Family:  # noqa: ANN001 — Graph or project dict
     return _FAMILIES["neural"]
 
 
+def usable_frameworks(graph) -> list[str]:  # noqa: ANN001
+    """The family's frameworks that every layer of ``graph`` has a form for (blocks for
+    data, training and I/O make no claim)."""
+    layers = []
+    for node in graph.nodes.values():
+        try:
+            supports = node.definition().supports
+        except Exception:  # noqa: BLE001 — unknown blocks make no claim either way
+            continue
+        if supports("pytorch") or supports("keras"):
+            layers.append(supports)
+    return [fw for fw in family_of(graph).frameworks if all(s(fw) for s in layers)]
+
+
 def resolve_framework(graph, framework: str = "auto") -> str:  # noqa: ANN001
     """The framework that trains ``graph``; validates an explicit choice. "auto" takes
-    the design's own choice (``meta["framework"]``, set in either app) when its family
-    trains with it."""
+    the design's own choice (``meta["framework"]``, set in either app) when every layer
+    has a form for it."""
     family = family_of(graph)
     if not family.trainable or not family.frameworks:
         raise ValueError(f"{family.label} projects are not trained in the app; "
                          "export their script instead")
     if framework == "auto":
         chosen = (getattr(graph, "meta", None) or {}).get("framework")
-        if chosen in family.frameworks:
+        if chosen in family.frameworks and chosen in usable_frameworks(graph):
             return chosen
         return family.choose(graph) if family.choose is not None else family.frameworks[0]
     if framework not in family.frameworks:
