@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -374,16 +375,47 @@ def train_together(gpus: int) -> None:
 
     # a spawned process starts from this file: it gets the settings changed since
     settings = {k: v for k, v in globals().items() if k.isupper() and plain(v)}
+    dropped = sorted(k for k, v in globals().items()
+                     if k.isupper() and v is not None and k not in settings)
+    if START_METHOD != "fork" and dropped:
+        print(f"warning: {', '.join(dropped)} can't be passed to the other processes here "
+              "(they start from this file): they train without them", flush=True)
     print(f"training on {count} {'CPU processes' if DEVICE == 'cpu' else 'GPUs'} "
           "(DistributedDataParallel)", flush=True)
     sys.stdout.flush()
     others = mp.start_processes(_one_of_many, args=(count, port, settings), nprocs=count - 1,
                                 join=False, start_method=START_METHOD)
+    done = threading.Event()
+    threading.Thread(target=_watch, args=(others.processes, done), daemon=True).start()
     try:
         _train_as(0, count, port)
-    finally:
-        while not others.join():
-            pass
+    except BaseException:
+        done.set()
+        _stop(others.processes)   # they would wait for this one until the backend times out
+        raise
+    done.set()
+    while not others.join():
+        pass
+
+
+def _stop(processes: list) -> None:
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+
+
+def _watch(processes: list, done: threading.Event) -> None:
+    """While this process trains, notice another one failing: this one would wait for it
+    in the next exchange until the backend times out."""
+    import os
+
+    while not done.wait(1.0):
+        failed = next((p for p in processes if p.exitcode not in (None, 0)), None)
+        if failed is not None:
+            print(f"a training process stopped (exit code {failed.exitcode}): stopping the "
+                  "run", flush=True)
+            _stop(processes)
+            os._exit(1)
 
 
 START_METHOD = "spawn" if sys.platform == "win32" else "fork"

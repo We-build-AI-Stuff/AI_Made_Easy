@@ -299,9 +299,11 @@ def main() -> None:
     callbacks.extend(CALLBACKS)
     if saver:
         callbacks.append(saver)
-    started, finished = train_model.get_weights(), []
-    callbacks.append(keras.callbacks.LambdaCallback(on_epoch_end=lambda e, logs: finished.append(e)))
-    if COMPILE:
+    finished, started = [], None
+    if COMPILE:   # the state to go back to if compiling fails
+        started = (train_model.get_weights(), [np.array(v) for v in optimizer.variables])
+        callbacks.append(keras.callbacks.LambdaCallback(
+            on_epoch_end=lambda e, logs: finished.append(e)))
         print("compiling with jit_compile", flush=True)
     while True:
         try:
@@ -314,7 +316,13 @@ def main() -> None:
                 raise
             print(f"jit_compile did not work ({type(exc).__name__}: {str(exc)[:200]}): "
                   "training without", flush=True)
-            train_model.set_weights(started)
+            weights, slots = started
+            train_model.set_weights(weights)
+            if slots and len(slots) == len(optimizer.variables):   # resumed: its own state
+                for variable, value in zip(optimizer.variables, slots, strict=True):
+                    variable.assign(value)
+            elif optimizer.variables:   # built by the failed attempt: start it afresh
+                optimizer = keras.optimizers.Adam(learning_rate=0.001, beta_1=0.9, beta_2=0.999, epsilon=1e-08)
             train_model.compile(optimizer=optimizer, loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True), jit_compile=False)
     deploy_model.save(MODEL_FILE)
     save_inference_state()

@@ -139,3 +139,81 @@ def test_keras_trains_without_compiling_when_it_fails(tmp_path):
     assert "jit_compile did not work (RuntimeError: cannot compile this model): " \
            "training without" in out
     assert (tmp_path / "metrics.json").is_file()
+
+
+_WORKER_BREAKS = ("def broken(*args):\n"
+                  "    raise SystemExit(3)\n"
+                  "m._one_of_many = broken")
+_FIRST_BREAKS = ("real = m.main\n"
+                 "def main():\n"
+                 "    if m.RANK == 0 and m.WORLD > 1:\n"
+                 "        raise RuntimeError('the first process broke')\n"
+                 "    real()\n"
+                 "m.main = main")
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform == "win32", reason="forks; the spawn test covers Windows")
+@pytest.mark.parametrize("breaks", [_WORKER_BREAKS, _FIRST_BREAKS], ids=["worker", "first"])
+def test_a_failing_process_stops_the_run(tmp_path, breaks):
+    """A process that fails leaves the others waiting for it in the next exchange: the
+    run stops instead of hanging until the backend's timeout."""
+    import time
+
+    pytest.importorskip("torch")
+    started = time.time()
+    done = _run(tmp_path, _script(_design(gpus=2, epochs=50), tmp_path), breaks)
+    assert done.returncode != 0
+    assert time.time() - started < 120
+    if breaks is _WORKER_BREAKS:
+        assert "a training process stopped (exit code 3): stopping the run" in done.stdout
+    else:
+        assert "the first process broke" in done.stderr
+
+
+def test_spawned_processes_warn_about_settings_they_cant_get(tmp_path):
+    pytest.importorskip("torch")
+    script = _script(_design(gpus=2), tmp_path)
+    done = _run(tmp_path, script, "m.START_METHOD = 'spawn'\n"
+                                  "m.INIT_HOOK = lambda model: None\n"
+                                  "m._train_as = lambda *a: None\n"
+                                  "import torch.multiprocessing as mp\n"
+                                  "class Fake:\n"
+                                  "    processes = []\n"
+                                  "    def join(self): return True\n"
+                                  "mp.start_processes = lambda *a, **k: Fake()")
+    out = _ok(done)
+    assert ("warning: INIT_HOOK can't be passed to the other processes here (they start "
+            "from this file): they train without them") in out
+
+
+@pytest.mark.slow
+def test_keras_retries_from_the_state_before_compiling(tmp_path):
+    """A failed jit_compile that already took a step: the retry starts from the weights
+    and optimizer state from before, so the run ends as one that never compiled."""
+    keras = pytest.importorskip("keras")
+    if keras.backend.backend() != "torch":
+        pytest.skip("checked on the torch backend")
+    plain = tmp_path / "plain"
+    _ok(_run(plain, _script(_design(epochs=2), plain, "keras")))
+    retried = tmp_path / "retried"
+    broken = ("import keras\n"
+              "real = keras.Model.fit\n"
+              "def fit(self, x, y, *args, **kwargs):\n"
+              "    if self.jit_compile:\n"
+              "        self.compile(optimizer=self.optimizer, loss=self.loss, jit_compile=False)\n"
+              "        self.train_on_batch(x[:8], y[:8])     # a step, then the failure\n"
+              "        self.jit_compile = True\n"
+              "        raise RuntimeError('cannot compile this model')\n"
+              "    import numpy as np\n"
+              "    moved = sum((float(np.abs(np.array(v)).sum()) for v in self.optimizer.variables\n"
+              "                 if 'momentum' in v.path), 0.0)\n"
+              "    print(f'retry: step {int(self.optimizer.iterations)}, momentum {moved}', flush=True)\n"
+              "    return real(self, x, y, *args, **kwargs)\n"
+              "keras.Model.fit = fit")
+    out = _ok(_run(retried, _script(_design(epochs=2, compile=True), retried, "keras"),
+                   broken))
+    assert "jit_compile did not work" in out
+    assert "retry: step 0, momentum 0.0" in out       # the failed step's momentum is gone
+    read = lambda f: json.loads((f / "metrics.json").read_text(encoding="utf-8"))  # noqa: E731
+    assert read(retried) == read(plain)
