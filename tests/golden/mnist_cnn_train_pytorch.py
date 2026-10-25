@@ -365,14 +365,22 @@ def train_together(gpus: int) -> None:
     set on this script carries over), with gradients averaged by DistributedDataParallel.
     The first process reports and saves; the others only train."""
     import socket
+    import subprocess
     import sys
 
     import torch.multiprocessing as mp
 
-    count = gpus if DEVICE == "cpu" else min(gpus, torch.cuda.device_count())
+    here = gpus
+    if DEVICE != "cpu":   # counted in another process: CUDA started here would break the fork
+        counted = subprocess.run([sys.executable, "-c",
+                                  "import torch; print(torch.cuda.device_count())"],
+                                 capture_output=True, text=True, check=False)
+        words = counted.stdout.split()
+        here = int(words[-1]) if counted.returncode == 0 and words else 0
+    count = min(gpus, here)
     if count < 2 or sys.platform == "win32":
         why = ("Windows can't fork the processes" if sys.platform == "win32"
-               else f"{torch.cuda.device_count()} CUDA GPU(s) here")
+               else f"{here} CUDA GPU(s) here")
         print(f"training on one device: {GPUS} GPUs asked for, {why}", flush=True)
         globals()["GPUS"] = 1
         main()
@@ -476,6 +484,10 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
             running, seen = totals.tolist()
         train_loss = running / max(seen, 1)
         val_loss, val_metrics = evaluate(model, loss_fn, val_loader, device)
+        if WORLD > 1:   # every process decides (schedule, best, stop) from the first one's
+            shared = torch.tensor([val_loss], dtype=torch.float64, device=device)
+            torch.distributed.broadcast(shared, 0)
+            val_loss = shared.item()
         monitored = val_loss if not math.isnan(val_loss) else train_loss
         scheduler.step()
         if log:
