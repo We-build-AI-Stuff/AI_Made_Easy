@@ -196,7 +196,7 @@ def test_keras_retries_from_the_state_before_compiling(tmp_path):
     if keras.backend.backend() != "torch":
         pytest.skip("checked on the torch backend")
     plain = tmp_path / "plain"
-    _ok(_run(plain, _script(_design(epochs=2), plain, "keras")))
+    _ok(_run(plain, _script(_dropout(_design(epochs=2)), plain, "keras")))
     retried = tmp_path / "retried"
     broken = ("import keras\n"
               "real = keras.Model.fit\n"
@@ -212,12 +212,22 @@ def test_keras_retries_from_the_state_before_compiling(tmp_path):
               "    print(f'retry: step {int(self.optimizer.iterations)}, momentum {moved}', flush=True)\n"
               "    return real(self, x, y, *args, **kwargs)\n"
               "keras.Model.fit = fit")
-    out = _ok(_run(retried, _script(_design(epochs=2, compile=True), retried, "keras"),
-                   broken))
+    out = _ok(_run(retried, _script(_dropout(_design(epochs=2, compile=True)), retried,
+                                    "keras"), broken))
     assert "jit_compile did not work" in out
     assert "retry: step 0, momentum 0.0" in out       # the failed step's momentum is gone
-    read = lambda f: json.loads((f / "metrics.json").read_text(encoding="utf-8"))  # noqa: E731
-    assert read(retried) == read(plain)
+    for name in ("metrics.json", "predictions.json"):   # and dropout draws as if never compiled
+        read = lambda f: json.loads((f / name).read_text(encoding="utf-8"))  # noqa: E731
+        assert read(retried) == read(plain), name
+
+
+def _dropout(design: dict) -> dict:
+    """The tiny design with dropout after its hidden layer (a layer that draws randomly)."""
+    design["nodes"].append({"id": "drop", "type": "core.dropout", "params": {"p": 0.3},
+                            "position": [0, 0]})
+    design["edges"] = [e for e in design["edges"] if e["from"] != "act/out"]
+    design["edges"] += [{"from": "act/out", "to": "drop/in"}, {"from": "drop/out", "to": "d2/in"}]
+    return design
 
 
 # ------------------------------------------------------------ Phase 1: bigger models
@@ -342,6 +352,31 @@ def test_quantization_aware_training_skips_what_it_cant_quantize():
     source = generate_training(Graph.from_dict(design), "pytorch")
     assert "QAT_EPOCHS = 0" in source
     assert "quantization-aware training is for models with one input and output" in source
+
+
+_COPIES = ("import copy\n"
+           "import torch\n"
+           "model = m.Tiny()\n"
+           "assert m.checkpoint_layers(model) > 0\n"
+           "twin = copy.deepcopy(model)\n"
+           "with torch.no_grad():\n"
+           "    for p in twin.parameters():\n"
+           "        p.zero_()\n"
+           "x = torch.randn(4, 16)\n"
+           "for mode in ('train', 'eval'):\n"
+           "    getattr(twin, mode)(); getattr(model, mode)()\n"
+           "    assert torch.equal(twin(x), torch.zeros(4, 3)), mode   # its own (zero) weights\n"
+           "    assert not torch.equal(model(x), torch.zeros(4, 3)), mode\n"
+           "print('copies run their own layers')\n"
+           "raise SystemExit(0)")
+
+
+def test_a_copy_of_a_checkpointed_model_runs_its_own_layers(tmp_path):
+    """EMA, SWA and quantization-aware training copy the model: the copy's checkpointing
+    wrappers must call the copy's layers, not the original's."""
+    pytest.importorskip("torch")
+    script = _script(_design(gradient_checkpointing=True), tmp_path)
+    assert "copies run their own layers" in _ok(_run(tmp_path, script, _COPIES))
 
 
 # ------------------------------------------------------------ Phase 2: fairness mitigation
@@ -697,6 +732,10 @@ def test_regressors_reach_a_value_and_bad_requests_say_why():
         search(_model(False), row, _columns(), locked=list(_columns()))
     with pytest.raises(CounterfactualError, match="pick a class to reach"):
         search(_model(False), row, _columns(), desired="maybe")
+    with pytest.raises(CounterfactualError, match="it already predicts no: pick another class"):
+        search(_model(False), row, _columns(), desired="no")
+    with pytest.raises(CounterfactualError, match="already reaches 30: pick another value"):
+        search(price, row, _columns(), target=30.0)          # its value now
 
 
 @pytest.mark.slow
@@ -736,6 +775,9 @@ def test_a_trained_network_says_what_would_change_its_prediction(isolated_home, 
                                             json={"row": row, "locked": ["b"]})
         assert got.status_code == 200
         assert {e["changes"][0]["column"] for e in got.json()["single"]} == {"a"}
+        bad = TestClient(create_app()).post(f"/api/runs/{run_id}/counterfactuals",
+                                            json={"row": row, "target": [1, 2]})
+        assert bad.status_code == 400 and "target must be a number" in bad.text
         _desktop_finds_changes(mgr, run_id)
     finally:
         api.try_service().close()
