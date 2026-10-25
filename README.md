@@ -62,6 +62,14 @@ boilerplate. It runs on the desktop or in the browser.
   ArcFace, CosFace, triplet and supervised contrastive losses for embeddings; SAM and
   Schedule-Free AdamW; weight averaging (EMA, SWA); Integrated Gradients; target encoding
   and SMOTE for classic models; Tiny Llama, Vision Transformer, ConvNeXt and ArcFace recipes.
+- **Several GPUs, resume anywhere, fairness by group (3.10).** PyTorch networks can
+  train on several GPUs, compile with `torch.compile` and checkpoint activations to save
+  memory. Keras runs and runs on SSH, Modal, containers, Kaggle and Colab resume where
+  they stopped. Results by group name the groups treated differently (four-fifths rule,
+  true- and false-positive rates), models export to OpenVINO, and both apps let a design
+  choose PyTorch or Keras.
+
+  ![Fairness by group: the groups treated differently](docs/images/web_fairness_by_group.png)
 - **Resume a run, train boosted models more, faster sequence models (3.9).** A run that
   stopped or crashed continues from its last saved epoch, as the same run. XGBoost,
   LightGBM, CatBoost and gradient-boosting models can grow more trees, and the

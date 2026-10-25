@@ -199,3 +199,53 @@ test("docs screenshots: 3.9 train a boosted model more", async ({ page, request 
   await page.getByTestId("train-more").click();
   await page.getByRole("dialog").screenshot({ path: `${OUT}/web_train_more_trees.png` });
 });
+
+test("docs screenshots: 3.10 fairness by group", async ({ page, request }) => {
+  test.setTimeout(300_000);
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  let seed = 7;
+  const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const rows = ["tenure,spend,region,churned"];
+  for (let i = 0; i < 900; i++) {
+    const [t, s] = [rand(), rand()];
+    const region = ["north", "south", "east"][i % 3];
+    let label = t + s < 1 ? 1 : 0;
+    if (region === "east" && rand() < 0.4) label = 1 - label;   // the model can't learn east
+    rows.push(`${(t * 60).toFixed(0)},${(s * 120).toFixed(1)},${region},${label}`);
+  }
+  const table = join(mkdtempSync(join(tmpdir(), "aime-shot-")), "churn_regions.csv");
+  writeFileSync(table, rows.join("\n") + "\n");
+  const chain = ["in", "d1", "act", "d2", "out"];
+  const design = {
+    schema_version: 3, name: "churn_regions", meta: {},
+    nodes: [
+      { id: "in", type: "core.input", params: { shape: "2" }, position: [0, 0] },
+      { id: "d1", type: "core.dense", params: { units: 16 }, position: [0, 0] },
+      { id: "act", type: "core.relu", params: {}, position: [0, 0] },
+      { id: "d2", type: "core.dense", params: { units: 2 }, position: [0, 0] },
+      { id: "out", type: "core.output", params: {}, position: [0, 0] },
+      { id: "data", type: "data.csv", params: { path: table, target_column: "churned" }, position: [0, 0] },
+      { id: "drop", type: "prep.drop_columns", params: { columns: "region" }, position: [0, 0] },
+      { id: "opt", type: "train.adam", params: { lr: 0.02 }, position: [0, 0] },
+      { id: "loss", type: "train.loss_cross_entropy", params: {}, position: [0, 0] },
+      { id: "acc", type: "eval.accuracy", params: {}, position: [0, 0] },
+      { id: "trainer", type: "train.trainer",
+        params: { epochs: 8, batch_size: 32, device: "cpu", seed: 0 }, position: [0, 0] },
+    ],
+    edges: chain.slice(1).map((b, i) => ({ from: `${chain[i]}/out`, to: `${b}/in` })),
+  };
+  const started = await (await request.post("/api/runs", { data: { graph: design, project: "churn" } })).json();
+  await expect.poll(async () => (await (await request.get(`/api/runs/${started.run_id}`)).json()).status,
+    { timeout: 200_000 }).toBe("finished");
+  await page.goto("/");
+  await page.getByRole("button", { name: "Experiments" }).click();
+  await page.getByLabel(/only “/).uncheck();
+  await page.getByTestId("runs").locator("tr", { hasText: started.run_id }).click();
+  await page.getByTestId("groups-run").click();
+  await page.locator("#group-column").selectOption("region");
+  await page.getByTestId("score-groups").click();
+  await expect(page.getByTestId("fairness")).toBeVisible({ timeout: 120_000 });
+  await page.getByRole("dialog").screenshot({ path: `${OUT}/web_fairness_by_group.png` });
+});

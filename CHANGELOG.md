@@ -1,5 +1,40 @@
 # Changelog
 
+## 3.10.0
+
+Resume Keras runs and runs on other machines, train on several GPUs, compile and
+checkpoint networks, check fairness by group, and export to OpenVINO. 762 blocks, 72
+recipes. See [docs/ROADMAP_3.10.md](docs/ROADMAP_3.10.md) for what is in this release.
+
+### Added
+- **Resume Keras runs:** Keras scripts save the weights, optimizer, random state and the
+  early-stopping and plateau counters after each epoch; a resumed run ends exactly where
+  an uninterrupted one does.
+- **Resume runs on other machines:** a run trained over SSH, on Modal, in a container, on
+  Kaggle or on Colab resumes on the same backend. Its saved state comes back with the
+  outputs and goes out again with the resumed run.
+- **Several GPUs** (Trainer `gpus`): one process per GPU with DistributedDataParallel;
+  the first one reports and saves.
+- **Compile** (Trainer `compile`) runs the network through `torch.compile`, falling back
+  to plain PyTorch with the reason when it can't.
+- **Gradient checkpointing** (Trainer `gradient_checkpointing`) recomputes activations
+  instead of keeping them: the same results with less memory. The budget's memory and
+  step-time estimates account for it.
+- **Fairness by group:** results by group also compare how often each group is predicted
+  each class and its true- and false-positive rates with all test rows, apply the
+  four-fifths rule, and name the groups treated differently.
+- **OpenVINO export** (`openvino` extra): an OpenVINO model folder, checked against
+  PyTorch on x86 CPUs; a CI job on Linux.
+- **Choose PyTorch or Keras in both apps:** the Training panel offers the frameworks
+  every layer supports. A Keras design finds its learning rate with Keras.
+
+### Changed
+- The desktop's canvas actions and the web designer's bottom panels moved to their own
+  modules (no change in behaviour).
+
+### Fixed
+- Downloading a remote run's outputs over SSH from a Mac no longer adds macOS `._` files.
+
 ## 3.9.0
 
 Resume a run where it stopped, train a boosted model more, faster sequence models, Keras
