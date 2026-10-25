@@ -342,3 +342,28 @@ def test_quantization_aware_training_skips_what_it_cant_quantize():
     source = generate_training(Graph.from_dict(design), "pytorch")
     assert "QAT_EPOCHS = 0" in source
     assert "quantization-aware training is for models with one input and output" in source
+
+
+_COPIES = ("import copy\n"
+           "import torch\n"
+           "model = m.Tiny()\n"
+           "assert m.checkpoint_layers(model) > 0\n"
+           "twin = copy.deepcopy(model)\n"
+           "with torch.no_grad():\n"
+           "    for p in twin.parameters():\n"
+           "        p.zero_()\n"
+           "x = torch.randn(4, 16)\n"
+           "for mode in ('train', 'eval'):\n"
+           "    getattr(twin, mode)(); getattr(model, mode)()\n"
+           "    assert torch.equal(twin(x), torch.zeros(4, 3)), mode   # its own (zero) weights\n"
+           "    assert not torch.equal(model(x), torch.zeros(4, 3)), mode\n"
+           "print('copies run their own layers')\n"
+           "raise SystemExit(0)")
+
+
+def test_a_copy_of_a_checkpointed_model_runs_its_own_layers(tmp_path):
+    """EMA, SWA and quantization-aware training copy the model: the copy's checkpointing
+    wrappers must call the copy's layers, not the original's."""
+    pytest.importorskip("torch")
+    script = _script(_design(gradient_checkpointing=True), tmp_path)
+    assert "copies run their own layers" in _ok(_run(tmp_path, script, _COPIES))
