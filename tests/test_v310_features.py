@@ -154,13 +154,13 @@ def test_the_keras_template_saves_and_clears_its_resume_state():
 
 
 # ------------------------------------------------------------ Phase 1: faster and bigger
-def _trained(tmp_path, name: str, **trainer) -> tuple[str, dict]:
+def _trained(tmp_path, name: str, before_main: str = "", **trainer) -> tuple[str, dict]:
     graph = _resumable_design(epochs=3)
     node = next(n for n in graph["nodes"] if n["type"] == "train.trainer")
     node["params"].update(device="cpu", **trainer)
     folder = tmp_path / name
     folder.mkdir()
-    done = _run(folder, export_training(Graph.from_dict(graph), "pytorch", folder))
+    done = _run(folder, export_training(Graph.from_dict(graph), "pytorch", folder), before_main)
     assert done.returncode == 0, done.stderr[-3000:]
     return done.stdout, json.loads((folder / "metrics.json").read_text(encoding="utf-8"))
 
@@ -196,6 +196,43 @@ def test_several_processes_train_together(tmp_path):
     assert out.count("saved best weights") == 1 and metrics["accuracy"] > 0.5
 
 
+_SECOND_DISAGREES = ("real, calls = m.evaluate, []\n"
+                     "def evaluate(*args, **kwargs):\n"
+                     "    loss, metrics = real(*args, **kwargs)\n"
+                     "    calls.append(1)\n"            # the second process sees it get worse
+                     "    return loss + 100.0 * m.RANK * len(calls), metrics\n"
+                     "m.evaluate = evaluate")
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(__import__("sys").platform == "win32", reason="the processes are forked")
+def test_processes_share_one_validation_loss(tmp_path):
+    """Each process decides early stopping and the schedule from the first one's
+    validation loss: one stopping alone would leave the others waiting for it."""
+    pytest.importorskip("torch")
+    out, _ = _trained(tmp_path, "shared", _SECOND_DISAGREES, gpus=2, epochs=6,
+                      early_stopping_patience=1)
+    assert [line.split()[1] for line in out.splitlines() if line.startswith("epoch")][:2] == \
+        ["1/6", "2/6"]
+
+
+@pytest.mark.slow
+def test_counting_gpus_leaves_cuda_alone(tmp_path):
+    pytest.importorskip("torch")
+    graph = _resumable_design()
+    next(n for n in graph["nodes"] if n["type"] == "train.trainer")["params"].update(gpus=2)
+    script = export_training(Graph.from_dict(graph), "pytorch", tmp_path)
+    done = _run(tmp_path, script, "m.DEVICE = 'cuda'\nm.main = lambda: print('one device')\n"
+                "m.train_together(2)\nimport torch\n"
+                "print('cuda started' if torch.cuda.is_initialized() else 'cuda untouched')\n"
+                "raise SystemExit")
+    assert done.returncode == 0, done.stderr[-3000:]
+    assert "cuda untouched" in done.stdout
+    import torch
+    if torch.cuda.device_count() < 2:
+        assert "2 GPUs asked for" in done.stdout and "one device" in done.stdout
+
+
 def test_trainer_settings_reach_the_script():
     from ai_made_easy.core.training.generate import generate_training
 
@@ -220,6 +257,8 @@ def test_checkpointing_lowers_the_memory_estimate():
         "gradient_checkpointing"] = True
     after = budget.estimate(graph)
     assert after.checkpointing and after.train_memory_bytes() <= before.train_memory_bytes()
+    # a flat network's layers save only their inputs, which checkpointing keeps anyway
+    assert after.train_memory_bytes() == before.train_memory_bytes()
     device = budget.get_device("rtx_3060")
     assert after.step_time_ms(device) == pytest.approx(before.step_time_ms(device) * 4 / 3)
 
