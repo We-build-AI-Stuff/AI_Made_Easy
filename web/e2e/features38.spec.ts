@@ -108,6 +108,7 @@ test("results by group flag the weak region, and a run trains more", async ({ pa
   const table = page.getByTestId("group-results");
   await expect(table).toContainText("Worse for east", { timeout: 120_000 });
   await expect(table.locator("tr.flagged")).toHaveCount(1);
+  await expect(page.getByTestId("fairness")).toContainText(/Treated differently: .*east/); // 3.10
   await page.keyboard.press("Escape");
 
   await page.getByTestId("train-more").click();

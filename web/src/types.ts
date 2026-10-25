@@ -585,6 +585,18 @@ export interface GroupResult {
   overall?: Record<string, number>;
   groups?: GroupRow[];
   flagged?: string[];
+  fairness?: Fairness | null;
+}
+
+/** 3.10: gaps in predicted-class and error rates between groups (classifiers). */
+export interface Fairness {
+  classes: string[];
+  parity_gap: number;
+  parity_ratio: number;
+  odds_gap: number;
+  worst: { parity?: string; odds?: string };
+  flagged: string[];
+  summary: string;
 }
 
 /** 3.9: whether a stopped, failed or interrupted run can continue (GET /api/runs/{id}/resume). */

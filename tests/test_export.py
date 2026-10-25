@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import platform
 import sys
 from pathlib import Path
 
@@ -31,7 +32,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SAMPLES = ROOT / "ai_made_easy" / "samples"
 HAS = {m: importlib.util.find_spec(m) is not None
        for m in ("torch", "torchvision", "onnxruntime", "executorch", "torch_geometric",
-                 "transformers", "tensorflow", "ai_edge_litert", "fastapi", "coremltools")}
+                 "transformers", "tensorflow", "ai_edge_litert", "fastapi", "coremltools",
+                 "openvino")}
 needs_torch = pytest.mark.skipif(not HAS["torch"], reason="needs torch")
 
 
@@ -156,7 +158,7 @@ _NEEDS = {"graph_": "torch_geometric", "shapes_": "torchvision", "yolo_": "torch
           "cifar10_transfer": "torchvision"}
 _FORMAT_NEEDS = {"onnx": "onnxruntime", "onnx_int8": "onnxruntime",
                  "executorch": "executorch", "executorch_int8": "executorch",
-                 "coreml": "coremltools"}
+                 "coreml": "coremltools", "openvino": "openvino"}
 _SLOW = {"speech_recognition_ctc", "lstm_classifier", "shapes_diffusion"}
 
 
@@ -181,7 +183,7 @@ def _build(graph: Graph):  # noqa: ANN202
 @needs_torch
 @pytest.mark.timeout(900)
 @pytest.mark.parametrize("fmt", ["onnx", "torchscript", "onnx_int8", "executorch",
-                                 "executorch_int8", "coreml"])
+                                 "executorch_int8", "coreml", "openvino"])
 @pytest.mark.parametrize("name", _pytorch_samples() if HAS["torch"] else [])
 def test_every_sample_round_trips(name, fmt, tmp_path):
     """Exports match PyTorch (float within 1e-4 of the output scale; int8 runs and is
@@ -191,6 +193,8 @@ def test_every_sample_round_trips(name, fmt, tmp_path):
             pytest.skip(f"needs {module}")
     if _FORMAT_NEEDS.get(fmt) and not HAS[_FORMAT_NEEDS[fmt]]:
         pytest.skip(f"needs {_FORMAT_NEEDS[fmt]}")
+    if fmt == "openvino" and platform.machine().lower() not in ("x86_64", "amd64"):
+        pytest.skip("OpenVINO is checked on x86 (its ARM CPU runtime lacks some operators)")
     if fmt.startswith("executorch") and name in _SLOW and not os.environ.get("AIME_SLOW"):
         pytest.skip("slow ExecuTorch lowering (set AIME_SLOW=1)")
     graph = Graph.from_dict(json.loads((SAMPLES / f"{name}.json").read_text(encoding="utf-8")))

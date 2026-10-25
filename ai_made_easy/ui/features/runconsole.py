@@ -98,6 +98,11 @@ class TrainingPage(QtWidgets.QWidget):
         from ai_made_easy.ui.features.backends import RunOnCombo
 
         self.run_on = RunOnCombo()
+        self.framework = QtWidgets.QComboBox()   # 3.10: saved on the design (meta)
+        self.framework.setToolTip("The framework this design trains with (saved with it)")
+        self.framework.setAccessibleName("Framework")
+        self.framework.hide()
+        top.addWidget(self.framework)
         top.addWidget(self.run_on)
         top.addWidget(self.start_btn)
         top.addWidget(self.stop_btn)
@@ -220,6 +225,24 @@ class TrainingPage(QtWidgets.QWidget):
             self.samples_text.show()
             self.samples_image.hide()
         self.samples_box.show()
+
+    FRAMEWORK_LABELS = {"pytorch": "PyTorch", "keras": "Keras"}
+
+    def set_frameworks(self, usable: list[str], chosen: str) -> None:
+        """Offer the frameworks every block of the design has (hidden with one)."""
+        blocker = QtCore.QSignalBlocker(self.framework)
+        self.framework.clear()
+        names = self.FRAMEWORK_LABELS
+        self.framework.addItem(f"Auto ({names.get(usable[0], 'PyTorch') if usable else 'PyTorch'})",
+                               "auto")
+        for fw in usable:
+            self.framework.addItem(names.get(fw, fw), fw)
+        if chosen != "auto" and chosen not in usable:
+            self.framework.addItem(f"{names.get(chosen, chosen)} (not every block has it)",
+                                   chosen)
+        self.framework.setCurrentIndex(max(self.framework.findData(chosen), 0))
+        del blocker
+        self.framework.setVisible(len(usable) > 1 or chosen != "auto")
 
     def reset(self) -> None:
         self.samples_box.hide()

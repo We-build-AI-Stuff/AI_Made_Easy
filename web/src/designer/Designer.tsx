@@ -8,6 +8,7 @@ import { type DragEvent, useCallback, useEffect, useMemo, useRef, useState } fro
 import { api, streamRun } from "../api";
 import { groupBounds, groupsOf, hiddenBy, notesOf } from "../canvas";
 import { RunOnSelect, useRunOn } from "../components/Backends";
+import { FrameworkSelect } from "../components/FrameworkSelect";
 import { LineChart, metricSeries } from "../components/LineChart";
 import { PipelinePanel } from "../components/Pipeline";
 import { drawDesign, type PngBox } from "../exportPng";
@@ -431,6 +432,7 @@ function Training() {
                   disabled={status === "running" || !validation?.valid}
                   data-testid="train">▶ Train</button>
           <button onClick={stop} disabled={status !== "running"}>Stop</button>
+          <FrameworkSelect />
           <RunOnSelect />
           <span className="dim">{runId ? `run ${runId} · ${status}` : "No run yet"}
             {last && ` · epoch ${last.epoch}`}</span>

@@ -155,6 +155,7 @@ class AppContext(FileActions, ExportActions, RunActions, DataActions, QtCore.QOb
         self.training_page.train_clicked.connect(self.act_train)
         self.training_page.stop_clicked.connect(self.act_stop)
         self.training_page.run_on.manage_requested.connect(self.act_backends)
+        self.training_page.framework.activated.connect(self._on_framework_chosen)
         self.training_page.errors_clicked.connect(self.act_error_analysis)
         self.training_page.saliency_clicked.connect(self.act_saliency)
         self.training_page.card_clicked.connect(self.act_model_card)
@@ -276,6 +277,14 @@ class AppContext(FileActions, ExportActions, RunActions, DataActions, QtCore.QOb
             summary, "" if summary else ("Classic ML pipelines have no layer summary."
                                          if kind.startswith("Classic") else ""), flops)
         self.summary_page.set_budget(budget.budget_of(ir))
+        if kind == "Neural network":
+            from ai_made_easy.core.api import describe_design
+
+            described = describe_design(ir)
+            self.training_page.set_frameworks(described["frameworks"],
+                                              ir.meta.get("framework") or "auto")
+        else:
+            self.training_page.set_frameworks([], "auto")
         self.summary_page.set_estimate(estimate, checks)
         self.params_chip.set_state(f"{summary.total_params_display} parameters"
                                    if summary else "")
@@ -284,6 +293,16 @@ class AppContext(FileActions, ExportActions, RunActions, DataActions, QtCore.QOb
         self._refresh_properties()
         if not self.graph_service.settled_from_load:
             self.project_store.mark_dirty()
+
+    def _on_framework_chosen(self, _index: int) -> None:
+        """Train with this framework: saved on the design as ``meta["framework"]``."""
+        value = self.training_page.framework.currentData()
+        meta = self.graph_service.adapter.meta
+        if value == "auto":
+            meta.pop("framework", None)
+        else:
+            meta["framework"] = value
+        self.graph_service.schedule()
 
     def _on_budget_changed(self, values: dict) -> None:
         """The Summary's budget controls edited ``meta["budget"]``: re-check the design."""

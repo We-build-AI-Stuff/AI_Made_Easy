@@ -70,8 +70,9 @@ def list_tasks(family: str | None = None) -> dict:
 
 
 def describe_design(graph: dict | Graph) -> dict:
-    """Family, task and trainable frameworks of a design."""
-    from ai_made_easy.core.families import family_of
+    """Family, task and trainable frameworks of a design: ``frameworks`` are the ones
+    every block of this design has a form for, ``framework`` the one it trains with."""
+    from ai_made_easy.core.families import family_of, resolve_framework, usable_frameworks
     from ai_made_easy.core.tasks import task_of
 
     g = _graph(graph)
@@ -80,7 +81,13 @@ def describe_design(graph: dict | Graph) -> dict:
         task = task_of(g)
     except Exception:  # noqa: BLE001 — incomplete designs have no task yet
         task = None
-    return {"family": family.to_dict(), "task": task.to_dict() if task else None}
+    usable = usable_frameworks(g)
+    try:
+        chosen = resolve_framework(g)
+    except ValueError:
+        chosen = None
+    return {"family": family.to_dict(), "task": task.to_dict() if task else None,
+            "frameworks": usable, "framework": chosen}
 
 
 def table_layout(graph: dict | Graph, node_id: str) -> dict:

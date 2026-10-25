@@ -389,7 +389,7 @@ def export_formats(run_id: str) -> str:
 def deploy_run(run_id: str, out_dir: str, formats: list[str] | None = None) -> str:
     """Build a model-server package (FastAPI app, Dockerfile, pinned requirements) from a
     finished training run, with optional exports: onnx, onnx_int8, torchscript, coreml,
-    executorch, executorch_int8 (PyTorch); onnx, saved_model, litert, litert_int8
+    openvino, executorch, executorch_int8 (PyTorch); onnx, saved_model, litert, litert_int8
     (Keras). Each export is checked against the model (see the result's formats)."""
     try:
         return json.dumps(api.deploy_run(run_id, out_dir, formats), default=str)
