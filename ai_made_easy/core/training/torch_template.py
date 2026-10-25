@@ -26,9 +26,7 @@ from __future__ import annotations
 
 import json
 import math
-{% if inspect %}
 import sys
-{% endif %}
 import time
 from pathlib import Path
 
@@ -423,12 +421,12 @@ def checkpoint_layers(model: nn.Module) -> int:
 
 
 def train_together(gpus: int) -> None:
-    """Train on several GPUs of this machine: one process each, forked (so whatever was
-    set on this script carries over), with gradients averaged by DistributedDataParallel.
-    The first process reports and saves; the others only train."""
+    """Train on several GPUs of this machine, with gradients averaged by
+    DistributedDataParallel. This process trains as the first one, which reports and
+    saves; the others are forked (spawned on Windows, which can't fork) and only train."""
+    import json
     import socket
     import subprocess
-    import sys
 
     import torch.multiprocessing as mp
 
@@ -441,41 +439,71 @@ def train_together(gpus: int) -> None:
         words = counted.stdout.split()
         here = int(words[-1]) if counted.returncode == 0 and words else 0
     count = min(gpus, here)
-    if count < 2 or sys.platform == "win32":
-        why = ("Windows can't fork the processes" if sys.platform == "win32"
-               else f"{here} CUDA GPU(s) here")
-        print(f"training on one device: {GPUS} GPUs asked for, {why}", flush=True)
+    if count < 2:
+        print(f"training on one device: {GPUS} GPUs asked for, {here} CUDA GPU(s) here",
+              flush=True)
         globals()["GPUS"] = 1
         main()
         return
     with socket.socket() as probe:   # a free port for the processes to meet on
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
+
+    def plain(value) -> bool:  # noqa: ANN001
+        try:
+            json.dumps(value)
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    # a spawned process starts from this file: it gets the settings changed since
+    settings = {k: v for k, v in globals().items() if k.isupper() and plain(v)}
     print(f"training on {count} {'CPU processes' if DEVICE == 'cpu' else 'GPUs'} "
           "(DistributedDataParallel)", flush=True)
     sys.stdout.flush()
-    mp.start_processes(_one_of_many, args=(count, port), nprocs=count, start_method="fork")
+    others = mp.start_processes(_one_of_many, args=(count, port, settings), nprocs=count - 1,
+                                join=False, start_method=START_METHOD)
+    try:
+        _train_as(0, count, port)
+    finally:
+        while not others.join():
+            pass
 
 
-def _one_of_many(rank: int, world: int, port: int) -> None:
+START_METHOD = "spawn" if sys.platform == "win32" else "fork"
+
+
+def _one_of_many(index: int, world: int, port: int, settings: dict) -> None:
+    """Process ``index + 1`` of ``world``: trains its share, reports nothing."""
     import os
-    import sys
 
+    globals().update(settings)
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+    _train_as(index + 1, world, port)
+
+
+def _train_as(rank: int, world: int, port: int) -> None:
     import torch.distributed as dist
 
     global RANK, WORLD
     RANK, WORLD = rank, world
-    if rank:   # one report: the first process's
-        sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
     gpu = DEVICE != "cpu"
     if gpu:
         torch.cuda.set_device(rank)
-    dist.init_process_group("nccl" if gpu else "gloo", init_method=f"tcp://127.0.0.1:{port}",
-                            rank=rank, world_size=world)
+    backend = "nccl" if gpu and sys.platform != "win32" else "gloo"   # no NCCL on Windows
+    dist.init_process_group(backend, init_method=f"tcp://127.0.0.1:{port}", rank=rank,
+                            world_size=world)
     try:
         main()
     finally:
         dist.destroy_process_group()
+
+
+def mean_across(grad: torch.Tensor, group) -> torch.Tensor:  # noqa: ANN001
+    """A gradient averaged over the processes training together."""
+    grad = grad.clone()
+    torch.distributed.all_reduce(grad, group=group)
+    return grad / WORLD
 
 
 def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
@@ -499,6 +527,10 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
     centres = [p for p in loss_fn.parameters() if p.requires_grad]
     if centres:   # ArcFace / CosFace class centres train with the model
         optimizer.add_param_group({"params": centres})
+    if centres and WORLD > 1:   # they live in the loss, outside DistributedDataParallel
+        group = torch.distributed.new_group()
+        for centre in centres:
+            centre.register_hook(lambda grad, group=group: mean_across(grad, group))
 {% endif %}
     for group in optimizer.param_groups:
         group["lr"] *= LR_SCALE * group.get("lr_mult", 1.0)
@@ -718,10 +750,18 @@ def cross_validate(device: torch.device) -> None:
     scores, oof = [], None
     for k in range(K_FOLDS):
         tr, va = fold != k, fold == k
-        train_loader = DataLoader(ArrayDataset(x[tr], y[tr]), batch_size=BATCH_SIZE, shuffle=True)
+        train = ArrayDataset(x[tr], y[tr])
+        if WORLD > 1:   # each process trains on its share of the fold
+            sampler = torch.utils.data.DistributedSampler(train, num_replicas=WORLD, rank=RANK,
+                                                          shuffle=True, seed=SEED + k)
+            train_loader = DataLoader(train, batch_size=BATCH_SIZE, sampler=sampler)
+        else:
+            train_loader = DataLoader(train, batch_size=BATCH_SIZE, shuffle=True)
         val_loader = DataLoader(ArrayDataset(x[va], y[va]), batch_size=BATCH_SIZE)
         model, loss_fn = fit({{ spec.class_name }}().to(device), train_loader, val_loader,
                              device, log=False)
+        if RANK:   # the first process scores the folds
+            continue
         outputs, _targets = predict(model, val_loader, device)
         if oof is None:
             oof = np.zeros((len(y), *outputs.shape[1:]), np.float32)
@@ -731,6 +771,8 @@ def cross_validate(device: torch.device) -> None:
         scores.append(metrics)
         print(f"fold {k + 1}/{K_FOLDS}: " + " ".join(
             f"{m}={v:.4f}" for m, v in metrics.items() if isinstance(v, float)))
+    if RANK:
+        return {}
     summary = {}
     for m in scores[0]:
         if isinstance(scores[0][m], float):

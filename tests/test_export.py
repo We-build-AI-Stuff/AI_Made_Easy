@@ -10,7 +10,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import platform
 import sys
 from pathlib import Path
 
@@ -193,8 +192,6 @@ def test_every_sample_round_trips(name, fmt, tmp_path):
             pytest.skip(f"needs {module}")
     if _FORMAT_NEEDS.get(fmt) and not HAS[_FORMAT_NEEDS[fmt]]:
         pytest.skip(f"needs {_FORMAT_NEEDS[fmt]}")
-    if fmt == "openvino" and platform.machine().lower() not in ("x86_64", "amd64"):
-        pytest.skip("OpenVINO is checked on x86 (its ARM CPU runtime lacks some operators)")
     if fmt.startswith("executorch") and name in _SLOW and not os.environ.get("AIME_SLOW"):
         pytest.skip("slow ExecuTorch lowering (set AIME_SLOW=1)")
     graph = Graph.from_dict(json.loads((SAMPLES / f"{name}.json").read_text(encoding="utf-8")))

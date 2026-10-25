@@ -111,7 +111,9 @@ On machines without the packages you need, set `install=true`, or `docker_image`
 
 A machine with several GPUs trains on them together when the Trainer's **GPUs** is more
 than one (PyTorch, DistributedDataParallel; the batch size is per GPU). It uses as many
-as the machine has, up to that number. **Compile** (`torch.compile`) and **Gradient
+as the machine has, up to that number, on Linux, macOS and Windows (where the processes
+are spawned and talk over gloo), and with k-fold cross-validation and metric-learning
+losses too. **Compile** (`torch.compile`, and Keras's `jit_compile`) and **Gradient
 checkpointing** (less memory, about a third more compute) are on the Trainer too.
 
 ## Kaggle

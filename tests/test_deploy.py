@@ -142,11 +142,12 @@ def test_package_runs_under_uvicorn(mgr, tmp_path):
                               stderr=subprocess.STDOUT)
     try:
         deadline = time.time() + 120
-        while time.time() < deadline:
+        while True:
             try:
                 urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
                 break
             except OSError:
+                assert time.time() < deadline, "the server never answered /health"
                 time.sleep(0.3)
         request = urllib.request.Request(
             f"http://127.0.0.1:{port}/predict", method="POST",

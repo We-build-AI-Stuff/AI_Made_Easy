@@ -215,6 +215,7 @@ def test_ssh_stop_and_reattach(manager, fake_ssh, isolated_home):
     deadline = time.time() + 120
     while not manager.history.epochs(run_id) and time.time() < deadline:
         time.sleep(0.2)
+    assert manager.history.epochs(run_id), "no epoch recorded after 120s"
     # the app "restarts": the old follower no longer writes the record, and a new
     # manager follows the still-running remote run again
     manager.get(run_id).history = None
@@ -386,6 +387,7 @@ def test_colab_through_drive_for_desktop(manager, tmp_path):
     deadline = time.time() + 30
     while not book_path.exists() and time.time() < deadline:
         time.sleep(0.1)
+    assert book_path.exists(), "no notebook after 30s"
     book = json.loads(book_path.read_text(encoding="utf-8"))
     assert "drive.mount" in "".join(book["cells"][1]["source"])
     assert manager.status(run_id)["state"] == "running"
@@ -406,6 +408,7 @@ def test_colab_manual_hand_off_and_import(manager, tmp_path):
     deadline = time.time() + 30
     while not book_path.exists() and time.time() < deadline:
         time.sleep(0.1)
+    assert book_path.exists(), "no notebook after 30s"
     book = json.loads(book_path.read_text(encoding="utf-8"))
     # in Colab: the %%writefile cell, the run cell, then the zip download
     source = "".join(book["cells"][1]["source"]).split("\n", 1)[1]

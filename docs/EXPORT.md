@@ -70,7 +70,9 @@ pip install tensorflow                  # Keras -> LiteRT
 - **OpenVINO** (PyTorch, the `openvino` extra): Intel's runtime for its CPUs, GPUs and
   NPUs. The export is a folder `model.openvino/` with `model.xml` and its weights
   `model.bin`, takes any batch size and is checked against PyTorch on this computer's
-  CPU in float32. Models with one input tensor; OpenVINO also reads the ONNX export.
+  CPU in float32 (within 1e-4, or 1e-3 on ARM CPUs such as Apple silicon, where a few
+  kernels drift slightly). Models with one input tensor; OpenVINO also reads the ONNX
+  export.
 
 ## Detectors and graph networks
 
@@ -124,7 +126,6 @@ rules:
 | Spline coupling (flows) | ExecuTorch, Core ML, OpenVINO | data-dependent shapes |
 | Glow's invertible 1x1 convolution | Core ML, OpenVINO | `diag` has no converter |
 | Hyena | ExecuTorch, Core ML, OpenVINO | FFTs (complex numbers) |
-| Retention (RetNet) | OpenVINO | group norm over a flattened tensor has no CPU kernel |
 | Seq2seq transformer | ExecuTorch | token-by-token decoding loop |
 | FT-Transformer | ExecuTorch int8 | categorical ids read from the float row |
 | Mask2Former | ExecuTorch int8 | integer index tensors |

@@ -246,7 +246,8 @@ def test_trainer_settings_reach_the_script():
     assert "COMPILE = True" in source and "CHECKPOINTING = True" in source
     assert "GPUS = 4" in source and "DistributedSampler" in source
     keras = generate_training(Graph.from_dict(graph), "keras")
-    assert "compiling, gradient checkpointing, several GPUs apply to PyTorch" in keras
+    assert "gradient checkpointing, several GPUs apply to PyTorch" in keras
+    assert "COMPILE = True" in keras
     plain = generate_training(Graph.from_dict(_resumable_design()), "pytorch")
     assert "GPUS = 1" in plain and "COMPILE = False" in plain
 

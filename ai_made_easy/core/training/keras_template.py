@@ -54,6 +54,7 @@ TARGET_SCALING = {{ target_scaling }}
 {% endif %}
 MODEL_FILE = "{{ spec.name }}_best.keras"
 CALLBACKS = []          # more Keras callbacks for fit (e.g. the learning-rate finder)
+COMPILE = {{ spec.trainer.compile | default(False) }}         # jit_compile (torch.compile on the PyTorch backend)
 RESUME = False          # continue from RESUME_FILE (resume an interrupted run)
 RESUME_FILE = "resume.weights.h5"   # weights and optimizer, saved after each epoch ("" = off)
 CLASS_NAMES = None
@@ -254,7 +255,7 @@ def main() -> None:
     train_model = deploy_model = model
 {% endif %}
     optimizer = {{ optimizer_expr }}
-    train_model.compile(optimizer=optimizer, loss={{ loss_expr }})
+    train_model.compile(optimizer=optimizer, loss={{ loss_expr }}, jit_compile=COMPILE)
     callbacks = [EpochReport(x_val, y_val)]
     if EARLY_STOP:
         callbacks.append(keras.callbacks.EarlyStopping(
@@ -272,10 +273,24 @@ def main() -> None:
     callbacks.extend(CALLBACKS)
     if saver:
         callbacks.append(saver)
-    train_model.fit(x_train, fit_y, validation_data=(x_val, val_y) if len(x_val) else None,
-                    epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=callbacks, verbose=0,
-                    initial_epoch=first_epoch{% if balance == "class weights" %},
-                    class_weight=class_weight{% endif %})
+    started, finished = train_model.get_weights(), []
+    callbacks.append(keras.callbacks.LambdaCallback(on_epoch_end=lambda e, logs: finished.append(e)))
+    if COMPILE:
+        print("compiling with jit_compile", flush=True)
+    while True:
+        try:
+            train_model.fit(x_train, fit_y, validation_data=(x_val, val_y) if len(x_val) else None,
+                            epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=callbacks, verbose=0,
+                            initial_epoch=first_epoch{% if balance == "class weights" %},
+                            class_weight=class_weight{% endif %})
+            break
+        except Exception as exc:  # noqa: BLE001 — a model jit_compile can't take trains without
+            if not train_model.jit_compile or finished:
+                raise
+            print(f"jit_compile did not work ({type(exc).__name__}: {str(exc)[:200]}): "
+                  "training without", flush=True)
+            train_model.set_weights(started)
+            train_model.compile(optimizer=optimizer, loss={{ loss_expr }}, jit_compile=False)
     deploy_model.save(MODEL_FILE)
     save_inference_state()
     try:  # inputs for int8 calibration and export checks (about 4 MB at most)

@@ -119,6 +119,7 @@ def test_sweep_runs_from_the_ui_service(ctx, app):
     while service.runner is not None and time.time() < deadline:
         app.processEvents()
         time.sleep(0.05)
+    assert service.runner is None, "the sweep was still running after 300s"
     record = service.sweeps.get(sid)
     assert record.state == "finished" and len(record.trials) == 2
     ctx.experiments_page.scope.setCurrentIndex(1)
