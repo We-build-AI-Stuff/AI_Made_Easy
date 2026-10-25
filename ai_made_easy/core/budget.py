@@ -10,8 +10,8 @@ Summary can show estimate vs measured once a real run has calibrated them.
   sequence terms; element-wise blocks cost one op per output value.
 * Training memory: weights + gradients + optimizer state for trainable
   weights, plus saved activations × batch (halved by mixed precision), plus the
-  device's runtime overhead. Gradient checkpointing keeps only the input of each
-  layer it wraps (weights, no batch norm) plus one such layer's activations while it
+  device's runtime overhead. Gradient checkpointing keeps only the output of each
+  layer it wraps (weights, no batch norm) plus one such layer's inner values while it
   is recomputed, and adds a forward pass to each step.
 * Inference latency (batch 1): compute time at a realistic fraction of the
   device's peak + memory traffic over its bandwidth + a small launch cost per
@@ -153,7 +153,6 @@ class LayerCost:
     activations: int        # values saved for backward (per sample)
     trainable: bool = True
     kernels: int = 1        # kernel launches in one forward pass
-    inputs: int = 0         # values per sample coming in
     composite: bool = False  # reports its own cost (may hold batch norm)
 
 
@@ -187,15 +186,17 @@ class Estimate:
 
     def checkpointed_activations(self) -> int:
         """Values per sample kept for backward with gradient checkpointing, as the script
-        does it: a layer with trainable weights and no batch norm keeps only its input,
-        and one such layer at a time recomputes its own; other layers keep theirs."""
+        does it: a layer with trainable weights and no batch norm keeps only its output
+        (the next one's input), and one such layer at a time recomputes the values inside
+        it; other layers keep theirs."""
         kept, recomputed = 0, 0
         for layer in self.layers:
             if not layer.trainable and layer.type_id != "core.input":
                 continue                    # frozen: keeps nothing for backward
             if layer.params and not layer.composite and "batch_norm" not in layer.type_id:
-                kept += min(layer.inputs, layer.activations)   # its input, unless counted before
-                recomputed = max(recomputed, layer.activations)
+                output = min(math.prod(layer.output_shape or [1]), layer.activations)
+                kept += output               # the next layer's checkpoint keeps it
+                recomputed = max(recomputed, layer.activations - output)
             else:
                 kept += layer.activations
         return kept + recomputed
@@ -362,7 +363,6 @@ def estimate(graph, device: str | Device | None = None) -> Estimate:  # noqa: AN
         kernels = int(kernels(resolved)) if callable(kernels) and in_shapes else 1
         est.layers.append(LayerCost(node.instance_id, defn.display_name, node.type_id,
                                     out_shape, params, flops, acts, trainable, kernels,
-                                    inputs=sum(math.prod(sh) for sh in in_shapes if sh),
                                     composite=callable(cost) or
                                     node.type_id == "core.pretrained_backbone"))
         est.params += params

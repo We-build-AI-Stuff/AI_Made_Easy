@@ -263,6 +263,21 @@ def test_checkpointing_lowers_the_memory_estimate():
     assert after.step_time_ms(device) == pytest.approx(before.step_time_ms(device) * 4 / 3)
 
 
+def test_checkpointed_layers_keep_their_outputs_for_the_next_one():
+    from ai_made_easy.core import budget
+
+    design = tiny_classifier_dict()                     # 16 → 1024 → 4 → 1024 → 3
+    dense = [("d1", 1024), ("d2", 4), ("d3", 1024), ("d4", 3)]
+    design["nodes"] = [n for n in design["nodes"] if n["id"] not in ("d1", "act", "d2")]
+    design["nodes"] += [{"id": i, "type": "core.dense", "params": {"units": u},
+                         "position": [0, 0]} for i, u in dense]
+    chain = ["in", *(i for i, _ in dense), "out"]
+    design["edges"] = [{"from": f"{a}/out", "to": f"{b}/in"} for a, b in zip(chain, chain[1:], strict=False)]
+    est = budget.estimate(Graph.from_dict(design))
+    assert est.activations >= 16 + 1024 + 4 + 1024      # every layer's input is saved
+    assert est.checkpointed_activations() >= est.activations   # nothing to recompute
+
+
 # ------------------------------------------------------------ Phase 2: fairness by group
 def test_fairness_measures_gaps_between_groups():
     from ai_made_easy.core import groups
