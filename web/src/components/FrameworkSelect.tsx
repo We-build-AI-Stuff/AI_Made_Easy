@@ -11,8 +11,10 @@ export function FrameworkSelect() {
   const { project, validation, meta, setMeta } = useStore();
   const [usable, setUsable] = useState<string[]>([]);
   useEffect(() => {
-    api.describe(project()).then((d) => setUsable(d.frameworks ?? []))
-      .catch(() => setUsable([]));
+    let current = true;   // an answer for an earlier version of the design is dropped
+    api.describe(project()).then((d) => { if (current) setUsable(d.frameworks ?? []); })
+      .catch(() => { if (current) setUsable([]); });
+    return () => { current = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [validation]);
   const chosen = typeof meta.framework === "string" ? meta.framework : "auto";
