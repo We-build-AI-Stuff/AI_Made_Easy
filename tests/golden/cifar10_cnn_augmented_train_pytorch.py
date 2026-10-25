@@ -380,9 +380,10 @@ def train_together(gpus: int) -> None:
 
     here = gpus
     if DEVICE != "cpu":   # counted in another process: CUDA started here would break the fork
-        counted = subprocess.run([sys.executable, "-c",
-                                  "import torch; print(torch.cuda.device_count())"],
-                                 capture_output=True, text=True, check=False)
+        python = sys.executable   # this script's interpreter: the one with torch
+        counted = subprocess.run([python, "-c", "import torch; print(torch.cuda.device_count())"],
+                                 capture_output=True, encoding="utf-8", errors="replace",
+                                 check=False)
         words = counted.stdout.split()
         here = int(words[-1]) if counted.returncode == 0 and words else 0
     count = min(gpus, here)
