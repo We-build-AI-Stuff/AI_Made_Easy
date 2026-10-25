@@ -356,9 +356,13 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
     async def what_would_change(run_id: str, payload: dict = Body(...)) -> dict:  # noqa: B008
         """What would change the prediction for one table row."""
         target = payload.get("target")
+        try:
+            goal = float(target) if target not in (None, "") else None
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "target must be a number") from exc
         return await asyncio.to_thread(
             api.what_would_change, run_id, payload.get("row") or {}, payload.get("desired"),
-            float(target) if target not in (None, "") else None, payload.get("locked") or [])
+            goal, payload.get("locked") or [])
 
     @app.post("/api/runs/{run_id}/try/file", dependencies=guard)
     async def try_file(run_id: str, file: UploadFile = File(...)) -> Response:  # noqa: B008

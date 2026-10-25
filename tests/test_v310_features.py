@@ -85,7 +85,15 @@ def _wait(condition, timeout: float = 120, what=lambda: "the run") -> None:  # n
 
 @pytest.mark.slow
 def test_a_stopped_ssh_run_resumes_on_its_host(isolated_home, fake_ssh):  # noqa: F811
+    """The resumed run reuses the stopped one's folder on the host. The launcher starts
+    slowly here, so the follower always looks before it: the stopped attempt's events
+    and exit code must already be gone."""
+    import sys
+
     pytest.importorskip("torch")
+    python3 = fake_ssh.parent / "remote-bin" / "python3"
+    python3.write_text('#!/bin/sh\ncase "$1" in aime_launch.py) sleep 3;; esac\n'
+                       f'exec "{sys.executable}" "$@"\n', encoding="utf-8")
     mgr = RunManager()
     api.set_manager(mgr)
     try:
