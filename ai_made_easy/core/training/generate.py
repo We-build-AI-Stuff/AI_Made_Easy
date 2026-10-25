@@ -241,6 +241,19 @@ def _torch_ctx(graph: Graph, spec: TrainingSpec) -> dict:
     if ctx["ema"] and ctx["swa"]:
         raise CodegenError("use one kind of weight averaging on the Trainer: EMA or SWA")
     ctx["gpus"] = int(spec.trainer.get("gpus") or 1)
+    ctx["sharded"] = bool(spec.trainer.get("sharding")) and ctx["gpus"] > 1
+    if ctx["sharded"] and (ctx["ema"] or ctx["swa"]):
+        raise CodegenError("sharded training keeps no averaged weights: turn off EMA / SWA "
+                           "on the Trainer, or sharding")
+    ctx["qat_epochs"] = int(spec.trainer.get("qat_epochs") or 0)
+    unquantized = ("a metric-learning loss" if spec.metric_loss
+                   else "two augmented views" if ctx["two_views"]
+                   else "labelled pairs" if spec.pairs
+                   else "a probabilistic head" if ctx["prob"] else "")
+    if ctx["qat_epochs"] and unquantized:
+        spec.warnings.append(f"quantization-aware training is for models with one input "
+                             f"and output; this one trains with {unquantized}: skipped")
+        ctx["qat_epochs"] = 0
     for kind in (spec.optimizer["kind"], spec.loss["kind"]):
         helper = cat.COMPONENTS[kind].meta.get("torch_helper")
         if helper:

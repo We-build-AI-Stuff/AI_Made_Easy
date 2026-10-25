@@ -24,6 +24,7 @@ Notes:
 """
 from __future__ import annotations
 
+import copy
 import json
 import math
 import sys
@@ -55,6 +56,9 @@ MIXED_PRECISION = {{ spec.trainer.mixed_precision }}
 COMPILE = {{ spec.trainer.compile }}   # torch.compile the training steps
 CHECKPOINTING = {{ spec.trainer.gradient_checkpointing }}   # recompute activations: less memory
 GPUS = {{ gpus | default(1) }}   # GPUs of this machine that train together (DistributedDataParallel)
+SHARDED = {{ sharded | default(False) }}   # with several GPUs: split the model between them (FSDP)
+PRECISION = "{{ spec.trainer.precision | default('auto') }}"   # mixed precision: auto, float16 or bfloat16
+QAT_EPOCHS = {{ qat_epochs | default(0) }}   # quantization-aware fine-tuning for the int8 export
 RANK, WORLD = 0, 1      # this process's place among them (set for each GPU's process)
 {% if ema %}
 EMA_DECAY = {{ spec.trainer.ema_decay }}   # evaluate and keep the averaged weights
@@ -464,8 +468,9 @@ def train_together(gpus: int) -> None:
     if START_METHOD != "fork" and dropped:
         print(f"warning: {', '.join(dropped)} can't be passed to the other processes here "
               "(they start from this file): they train without them", flush=True)
-    print(f"training on {count} {'CPU processes' if DEVICE == 'cpu' else 'GPUs'} "
-          "(DistributedDataParallel)", flush=True)
+    how = "FSDP: the model is split between them" if SHARDED else "DistributedDataParallel"
+    print(f"training on {count} {'CPU processes' if DEVICE == 'cpu' else 'GPUs'} ({how})",
+          flush=True)
     sys.stdout.flush()
     others = mp.start_processes(_one_of_many, args=(count, port, settings), nprocs=count - 1,
                                 join=False, start_method=START_METHOD)
@@ -531,6 +536,33 @@ def _train_as(rank: int, world: int, port: int) -> None:
         dist.destroy_process_group()
 
 
+def shard(model: nn.Module, device: torch.device) -> None:
+    """Split each layer's weights (and so its gradients and optimizer state) between the
+    processes; a layer gathers its weights only while it computes (FSDP)."""
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.fsdp import fully_shard
+
+    mesh = init_device_mesh(device.type, (WORLD,))
+    for layer in model.children():
+        if any(p.requires_grad for p in layer.parameters()):
+            fully_shard(layer, mesh=mesh)
+    fully_shard(model, mesh=mesh)
+
+
+def snapshot(model: nn.Module) -> dict:
+    """The weights, on the CPU; sharded weights are gathered whole on the first process
+    (every process takes part)."""
+    if WORLD > 1 and SHARDED:
+        from torch.distributed.checkpoint.state_dict import (
+            StateDictOptions,
+            get_model_state_dict,
+        )
+
+        return get_model_state_dict(model, options=StateDictOptions(full_state_dict=True,
+                                                                    cpu_offload=True))
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+
 def mean_across(grad: torch.Tensor, group) -> torch.Tensor:  # noqa: ANN001
     """A gradient averaged over the processes training together."""
     grad = grad.clone()
@@ -551,6 +583,10 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
 {% if prob and prob.kl %}
     kl_scale = 1.0 / max(len(train_loader.dataset), 1)   # ELBO per training example
 {% endif %}
+    unsharded = None
+    if WORLD > 1 and SHARDED:   # the first process keeps a whole copy to test and save
+        unsharded = copy.deepcopy(model).cpu() if RANK == 0 else None
+        shard(model, device)
     params = PARAM_GROUPS(model) if PARAM_GROUPS is not None else model.parameters()
     optimizer = {{ optimizer_expr | replace("model.parameters()", "params") }}
 {% if metric_loss %}
@@ -586,10 +622,13 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
 {% else %}
     use_amp = MIXED_PRECISION and device.type in ("cuda", "mps")
 {% endif %}
-    amp_dtype = torch.float16 if device.type == "cuda" else torch.bfloat16
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")
+    amp_dtype = (torch.bfloat16 if PRECISION == "bfloat16"
+                 or (PRECISION == "auto" and device.type != "cuda") else torch.float16)
+    # float16 needs its loss scaled so small gradients don't vanish; bfloat16 doesn't
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda"
+                                  and amp_dtype == torch.float16)
     net = model   # what the training steps call
-    if WORLD > 1:
+    if WORLD > 1 and not SHARDED:
         net = nn.parallel.DistributedDataParallel(
             model, device_ids=[device.index] if device.type == "cuda" else None,
             # experts a batch never routes to get no gradient
@@ -751,15 +790,22 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
                   f"{extra} lr={lr:.3g} ({time.time() - started:.1f}s)", flush=True)
         if monitored < best_loss:
             best_loss, bad_epochs = monitored, 0
-            best_state = {k: v.detach().cpu().clone() for k, v in {{ "ema.module" if ema else ("scored" if swa else "model") }}.state_dict().items()}
+            best_state = snapshot({{ "ema.module" if ema else ("scored" if swa else "model") }})
         else:
             bad_epochs += 1
             if EARLY_STOP and bad_epochs >= EARLY_STOP:
                 if log:
                     print(f"early stopping: no improvement for {EARLY_STOP} epochs")
                 break
-        if log and RESUME_FILE and RANK == 0:
+        if log and RESUME_FILE and RANK == 0 and not SHARDED:
             save_resume(epoch, resumable, (best_loss, best_state, bad_epochs))
+    if WORLD > 1 and SHARDED:
+        best_state = best_state if best_state is not None else snapshot(model)
+        if RANK:   # only the first process holds the gathered weights
+            return model, loss_fn
+        for layer in unsharded.modules():   # checkpointing's wrappers point at the shards
+            layer.__dict__.pop("forward", None)
+        model = unsharded.to(device)
     if best_state is not None:
         model.load_state_dict(best_state)
     return model, loss_fn

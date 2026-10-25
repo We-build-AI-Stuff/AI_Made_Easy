@@ -8,6 +8,7 @@ Needs:  torch, numpy
 """
 from __future__ import annotations
 
+import copy
 import json
 import math
 import sys
@@ -32,6 +33,9 @@ MIXED_PRECISION = False
 COMPILE = False   # torch.compile the training steps
 CHECKPOINTING = False   # recompute activations: less memory
 GPUS = 1   # GPUs of this machine that train together (DistributedDataParallel)
+SHARDED = False   # with several GPUs: split the model between them (FSDP)
+PRECISION = "auto"   # mixed precision: auto, float16 or bfloat16
+QAT_EPOCHS = 0   # quantization-aware fine-tuning for the int8 export
 RANK, WORLD = 0, 1      # this process's place among them (set for each GPU's process)
 VAL_FRACTION = 0.1
 TEST_FRACTION = 0.1
@@ -424,8 +428,9 @@ def train_together(gpus: int) -> None:
     if START_METHOD != "fork" and dropped:
         print(f"warning: {', '.join(dropped)} can't be passed to the other processes here "
               "(they start from this file): they train without them", flush=True)
-    print(f"training on {count} {'CPU processes' if DEVICE == 'cpu' else 'GPUs'} "
-          "(DistributedDataParallel)", flush=True)
+    how = "FSDP: the model is split between them" if SHARDED else "DistributedDataParallel"
+    print(f"training on {count} {'CPU processes' if DEVICE == 'cpu' else 'GPUs'} ({how})",
+          flush=True)
     sys.stdout.flush()
     others = mp.start_processes(_one_of_many, args=(count, port, settings), nprocs=count - 1,
                                 join=False, start_method=START_METHOD)
@@ -491,6 +496,33 @@ def _train_as(rank: int, world: int, port: int) -> None:
         dist.destroy_process_group()
 
 
+def shard(model: nn.Module, device: torch.device) -> None:
+    """Split each layer's weights (and so its gradients and optimizer state) between the
+    processes; a layer gathers its weights only while it computes (FSDP)."""
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.fsdp import fully_shard
+
+    mesh = init_device_mesh(device.type, (WORLD,))
+    for layer in model.children():
+        if any(p.requires_grad for p in layer.parameters()):
+            fully_shard(layer, mesh=mesh)
+    fully_shard(model, mesh=mesh)
+
+
+def snapshot(model: nn.Module) -> dict:
+    """The weights, on the CPU; sharded weights are gathered whole on the first process
+    (every process takes part)."""
+    if WORLD > 1 and SHARDED:
+        from torch.distributed.checkpoint.state_dict import (
+            StateDictOptions,
+            get_model_state_dict,
+        )
+
+        return get_model_state_dict(model, options=StateDictOptions(full_state_dict=True,
+                                                                    cpu_offload=True))
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+
 def mean_across(grad: torch.Tensor, group) -> torch.Tensor:  # noqa: ANN001
     """A gradient averaged over the processes training together."""
     grad = grad.clone()
@@ -503,16 +535,23 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
     loss_fn = make_loss()
     if hasattr(loss_fn, "to"):
         loss_fn = loss_fn.to(device)
+    unsharded = None
+    if WORLD > 1 and SHARDED:   # the first process keeps a whole copy to test and save
+        unsharded = copy.deepcopy(model).cpu() if RANK == 0 else None
+        shard(model, device)
     params = PARAM_GROUPS(model) if PARAM_GROUPS is not None else model.parameters()
     optimizer = torch.optim.Adam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-08)
     for group in optimizer.param_groups:
         group["lr"] *= LR_SCALE * group.get("lr_mult", 1.0)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-06)
     use_amp = MIXED_PRECISION and device.type in ("cuda", "mps")
-    amp_dtype = torch.float16 if device.type == "cuda" else torch.bfloat16
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")
+    amp_dtype = (torch.bfloat16 if PRECISION == "bfloat16"
+                 or (PRECISION == "auto" and device.type != "cuda") else torch.float16)
+    # float16 needs its loss scaled so small gradients don't vanish; bfloat16 doesn't
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda"
+                                  and amp_dtype == torch.float16)
     net = model   # what the training steps call
-    if WORLD > 1:
+    if WORLD > 1 and not SHARDED:
         net = nn.parallel.DistributedDataParallel(
             model, device_ids=[device.index] if device.type == "cuda" else None,
             # experts a batch never routes to get no gradient
@@ -581,15 +620,22 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
                   f"{extra} lr={lr:.3g} ({time.time() - started:.1f}s)", flush=True)
         if monitored < best_loss:
             best_loss, bad_epochs = monitored, 0
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            best_state = snapshot(model)
         else:
             bad_epochs += 1
             if EARLY_STOP and bad_epochs >= EARLY_STOP:
                 if log:
                     print(f"early stopping: no improvement for {EARLY_STOP} epochs")
                 break
-        if log and RESUME_FILE and RANK == 0:
+        if log and RESUME_FILE and RANK == 0 and not SHARDED:
             save_resume(epoch, resumable, (best_loss, best_state, bad_epochs))
+    if WORLD > 1 and SHARDED:
+        best_state = best_state if best_state is not None else snapshot(model)
+        if RANK:   # only the first process holds the gathered weights
+            return model, loss_fn
+        for layer in unsharded.modules():   # checkpointing's wrappers point at the shards
+            layer.__dict__.pop("forward", None)
+        model = unsharded.to(device)
     if best_state is not None:
         model.load_state_dict(best_state)
     return model, loss_fn
@@ -725,6 +771,74 @@ def _inputs(loader: DataLoader, limit: int) -> tuple:
     return x[:keep], y[:keep]
 
 
+class Frozen(nn.Module):
+    """An exported (quantized) program, called like a model; its own train() / eval()
+    are off limits, so it isn't registered as a submodule."""
+
+    def __init__(self, program) -> None:  # noqa: ANN001
+        super().__init__()
+        object.__setattr__(self, "program", program)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.program(x)
+
+
+def quantization_aware(model: nn.Module, loss_fn, train_loader: DataLoader,
+                       test_loader: DataLoader) -> dict:
+    """Fine-tune a copy with int8 rounding simulated (QAT, for XNNPACK: ExecuTorch's int8
+    export), save the quantized program (qat_int8.pt2) and score it on the test data."""
+    try:
+        from executorch.backends.xnnpack.quantizer.xnnpack_quantizer import (
+            XNNPACKQuantizer,
+            get_symmetric_quantization_config,
+        )
+        from torchao.quantization.pt2e import (
+            move_exported_model_to_eval,
+            move_exported_model_to_train,
+        )
+        from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_qat_pt2e
+    except ImportError as exc:
+        print(f"quantization-aware training skipped: it needs the export extra ({exc})")
+        return {}
+    cpu = torch.device("cpu")
+    model = copy.deepcopy(model).to(cpu).eval()
+    loss_fn = loss_fn.to(cpu) if hasattr(loss_fn, "to") else loss_fn
+    example = next(iter(train_loader))[0][:2].to(cpu)
+    batch = torch.export.Dim("batch", min=1)
+    try:
+        captured = torch.export.export(model, (example,), dynamic_shapes=({0: batch},))
+        quantizer = XNNPACKQuantizer()
+        quantizer.set_global(get_symmetric_quantization_config(is_qat=True))
+        prepared = prepare_qat_pt2e(captured.module(), quantizer)
+    except Exception as exc:  # noqa: BLE001 — not every model can be captured whole
+        print(f"quantization-aware training skipped: the model can't be captured for "
+              f"int8 ({type(exc).__name__}: {str(exc)[:200]})")
+        return {}
+    optimizer = torch.optim.Adam(prepared.parameters(), lr=1e-4)   # a gentle fine-tune
+    for epoch in range(1, QAT_EPOCHS + 1):
+        move_exported_model_to_train(prepared)
+        running, seen = 0.0, 0
+        for xb, yb in train_loader:
+            out, target = adapt(prepared(xb.to(cpu)), yb.to(cpu))
+            loss = loss_fn(out, target)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            running += loss.item() * len(xb)
+            seen += len(xb)
+        print(f"quantization-aware epoch {epoch}/{QAT_EPOCHS} "
+              f"train_loss={running / max(seen, 1):.4f}", flush=True)
+    move_exported_model_to_eval(prepared)
+    quantized = convert_pt2e(prepared)
+    torch.export.save(torch.export.export(quantized, (example,), dynamic_shapes=({0: batch},)),
+                      "qat_int8.pt2")
+    test_loss, metrics = evaluate(Frozen(quantized), loss_fn, test_loader, cpu)
+    scores = {"loss": test_loss, **{k: v for k, v in metrics.items() if isinstance(v, float)}}
+    print("int8 (quantization-aware) test: " + " ".join(f"{k}={v:.4f}"
+                                                       for k, v in scores.items()))
+    return {f"int8_{k}": v for k, v in scores.items()}
+
+
 def save_calibration(train_loader: DataLoader, test_loader: DataLoader) -> None:
     """A few training inputs (int8 calibration for exports) and labelled test inputs
     (exports are checked against the model on them)."""
@@ -774,6 +888,8 @@ def main() -> None:
     test_loss, test_metrics = evaluate(model, loss_fn, test_loader, device)
     report = {"loss": test_loss, **{k: v for k, v in test_metrics.items() if isinstance(v, float)}}
     print("test: " + " ".join(f"{k}={v:.4f}" for k, v in report.items()))
+    if QAT_EPOCHS:
+        test_metrics.update(quantization_aware(model, loss_fn, train_loader, test_loader))
     final = {**report, **test_metrics, **{f"cv_{m}": v for m, v in cv.items()}}
     Path("metrics.json").write_text(json.dumps(
         {k: v for k, v in final.items() if isinstance(v, (float, list))}, indent=1), encoding="utf-8")

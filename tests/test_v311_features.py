@@ -217,3 +217,102 @@ def test_keras_retries_from_the_state_before_compiling(tmp_path):
     assert "retry: step 0, momentum 0.0" in out       # the failed step's momentum is gone
     read = lambda f: json.loads((f / "metrics.json").read_text(encoding="utf-8"))  # noqa: E731
     assert read(retried) == read(plain)
+
+
+# ------------------------------------------------------------ Phase 1: bigger models
+def test_bfloat16_needs_no_loss_scaling():
+    from ai_made_easy.core.training.generate import generate_training
+
+    source = generate_training(Graph.from_dict(_design(precision="bfloat16",
+                                                       mixed_precision=True)), "pytorch")
+    assert 'PRECISION = "bfloat16"' in source
+    assert "and amp_dtype == torch.float16)" in source        # the scaler only for float16
+    plain = generate_training(Graph.from_dict(_design()), "pytorch")
+    assert 'PRECISION = "auto"' in plain and "SHARDED = False" in plain
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform == "win32", reason="forks; the spawn test covers Windows")
+@pytest.mark.parametrize("checkpointing", [False, True])
+def test_sharded_processes_train_and_save_a_whole_model(tmp_path, checkpointing):
+    torch = pytest.importorskip("torch")
+    design = _design(gpus=2, sharding=True, epochs=4, gradient_checkpointing=checkpointing)
+    out = _ok(_run(tmp_path, _script(design, tmp_path)))
+    assert "training on 2 CPU processes (FSDP: the model is split between them)" in out
+    assert [line.split()[1] for line in out.splitlines() if line.startswith("epoch")] == \
+        ["1/4", "2/4", "3/4", "4/4"]
+    weights = torch.load(next(tmp_path.glob("*_best.pt")))
+    assert all(not hasattr(w, "placements") for w in weights.values())   # plain tensors
+    assert weights["dense_1.weight"].shape == (8, 16)                     # whole, not a shard
+    assert json.loads((tmp_path / "metrics.json").read_text(encoding="utf-8"))["accuracy"] > 0.5
+    assert not (tmp_path / "resume.pt").exists()                 # sharded runs don't resume
+
+
+def test_sharding_checks_and_memory():
+    from ai_made_easy.core import budget
+    from ai_made_easy.core.training.catalog import TRAINER
+
+    messages = [m for _, m in TRAINER.checks({"sharding": True, "gpus": 1})]
+    assert any("set GPUs to 2 or more" in m for m in messages)
+    assert ("error", "sharded training keeps no averaged weights: turn off EMA / SWA, or "
+                     "sharding") in TRAINER.checks({"sharding": True, "gpus": 2,
+                                                    "ema_decay": 0.99})
+    whole = budget.estimate(Graph.from_dict(_design(gpus=4)))
+    sharded = budget.estimate(Graph.from_dict(_design(gpus=4, sharding=True)))
+    assert sharded.sharded and not whole.sharded
+    model_part = lambda e: e.train_memory_bytes(batch_size=0) - (e.device.overhead_gb * budget.GB  # noqa: E731
+                                                               if e.device else 0)
+    assert model_part(sharded) < model_part(whole)
+
+
+def test_the_fix_for_memory_shards_a_model_on_several_gpus(monkeypatch):
+    from ai_made_easy.core import budget, fixes
+
+    graph = Graph.from_dict(_design(gpus=4, mixed_precision=True))   # already on
+    est = budget.estimate(graph)
+    whole, sharded_bytes = est.train_memory_bytes(), None
+    est.sharded = True
+    sharded_bytes = est.train_memory_bytes()
+    limit = (whole + sharded_bytes) / 2 / budget.GB              # fits only when sharded
+    monkeypatch.setattr(budget, "check", lambda g: [type("C", (), {"kind": "train_memory",
+                                                                   "limit": limit})()])
+    fixed = fixes._fit_training_memory(graph)
+    assert fixed and fixed[0] == "Shard the model"
+    trainer = next(n for n in fixed[2].nodes.values() if n.type_id == "train.trainer")
+    assert trainer.params["sharding"] is True
+
+
+@pytest.mark.slow
+def test_quantization_aware_training_feeds_the_int8_export(tmp_path):
+    pytest.importorskip("torch")
+    pytest.importorskip("executorch")
+    pytest.importorskip("torchao")
+    from ai_made_easy.core.deploy.package import build_package
+    from ai_made_easy.core.runner.manager import RunManager
+    from ai_made_easy.core.runs.history import RunHistory
+
+    mgr = RunManager(RunHistory(tmp_path / "runs"))
+    run_id = mgr.start(Graph.from_dict(_design(qat_epochs=2)), "pytorch")
+    status = mgr.wait(run_id, 600)
+    assert status["state"] == "finished", mgr.history.get(run_id).error[-2000:]
+    run = mgr.history.path(run_id)
+    logs = "\n".join(mgr.get(run_id).logs)
+    assert "quantization-aware epoch 2/2" in logs and "int8 (quantization-aware) test:" in logs
+    assert (run / "qat_int8.pt2").is_file()
+    metrics = json.loads((run / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["int8_accuracy"] > 0.5
+    result = build_package(run, tmp_path / "pkg", formats=("executorch_int8",))
+    entry = result.formats["executorch_int8"]
+    assert entry["ok"], entry
+    assert "quantization-aware trained" in entry["note"]
+
+
+def test_quantization_aware_training_skips_what_it_cant_quantize():
+    from ai_made_easy.core.training.generate import generate_training
+
+    design = _design(qat_epochs=1)
+    loss = next(n for n in design["nodes"] if n["id"] == "loss")
+    loss.update(type="train.loss_arcface", params={"classes": 3})
+    source = generate_training(Graph.from_dict(design), "pytorch")
+    assert "QAT_EPOCHS = 0" in source
+    assert "quantization-aware training is for models with one input and output" in source

@@ -106,7 +106,7 @@ def _artifacts(run_dir: Path, framework: str) -> tuple[Path, list[Path]]:
                 f"the run has no {pattern} — it did not finish training, was trained with "
                 "k-fold cross-validation only, or predates AI Made Easy 2.0 (retrain it)")
         files.extend(found)
-    for optional in ("classes.json", "metrics.json", "calibration.npz"):
+    for optional in ("classes.json", "metrics.json", "calibration.npz", "qat_int8.pt2"):
         if (run_dir / optional).exists():
             files.append(run_dir / optional)
     return script, files

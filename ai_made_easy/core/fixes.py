@@ -195,6 +195,13 @@ def _fit_training_memory(g: "Graph"):
         trainer.params["mixed_precision"] = True
         return ("Use mixed precision", "turn on mixed precision: activations take half the "
                 "memory and the batch size stays the same", g)
+    if est.gpus > 1 and not est.sharded:
+        est.sharded = True
+        if est.train_memory_bytes() <= limit:
+            trainer.params["sharding"] = True
+            return ("Shard the model", f"split the weights, gradients and optimizer state "
+                    f"between the {est.gpus} GPUs (FSDP): each holds its share", g)
+        est.sharded = False
     batch = est.fitting_batch(limit)
     if not batch or batch >= est.batch_size:
         return None
