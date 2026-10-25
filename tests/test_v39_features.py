@@ -3,8 +3,10 @@ for Keras designs."""
 from __future__ import annotations
 
 import json
+import runpy
 import subprocess
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from conftest import tiny_classifier_dict
@@ -133,6 +135,57 @@ def test_the_template_saves_and_clears_its_resume_state():
     source = generate_training(Graph.from_dict(tiny_classifier_dict()), "pytorch")
     assert "RESUME = False" in source and "save_resume(epoch, resumable" in source
     assert "Path(RESUME_FILE).unlink(missing_ok=True)" in source
+
+
+@pytest.mark.parametrize("device", ["cuda", "mps"])
+def test_resume_restores_rng_states_mapped_to_an_accelerator(tmp_path, monkeypatch, device):
+    torch = pytest.importorskip("torch")
+    import numpy as np
+
+    script = export_training(Graph.from_dict(tiny_classifier_dict()), "pytorch", tmp_path)
+    generated = runpy.run_path(str(script))
+
+    class MappedState:
+        """Stand in for a tensor moved to an accelerator by map_location."""
+
+        def __init__(self, value):
+            self.value = value
+
+        def cpu(self):
+            return self.value
+
+    saved = [torch.Generator().manual_seed(seed).get_state() for seed in range(5)]
+    numpy_rng = np.random.RandomState(42)
+    state = {
+        "model": object(), "shuffle": MappedState(saved[0]), "epoch": 2,
+        "best": (0.5, {}, 1),
+        "rng": {"torch": MappedState(saved[1]), "numpy": numpy_rng.get_state(),
+                "cuda": [MappedState(s) for s in saved[2:4]], "mps": MappedState(saved[4])},
+    }
+    load = Mock(return_value=state)
+    monkeypatch.setattr(torch, "load", load)
+    shuffle, cpu_rng, mps_rng = (torch.Generator() for _ in range(3))
+    cuda_rngs = [torch.Generator(), torch.Generator()]
+    restored_numpy = np.random.RandomState()
+    monkeypatch.setattr(torch, "set_rng_state", cpu_rng.set_state)
+    monkeypatch.setattr(np.random, "set_state", restored_numpy.set_state)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+
+    def restore_cuda(states):
+        for rng, value in zip(cuda_rngs, states, strict=True):
+            rng.set_state(value)
+
+    monkeypatch.setattr(torch.cuda, "set_rng_state_all", restore_cuda)
+    monkeypatch.setattr(torch.mps, "set_rng_state", mps_rng.set_state)
+    model = Mock()
+    objects = {"model": model, "shuffle": generated["GeneratorState"](shuffle)}
+    assert generated["load_resume"](objects, device) == (2, state["best"])
+    load.assert_called_once_with("resume.pt", map_location=device, weights_only=False)
+    model.load_state_dict.assert_called_once_with(state["model"])
+    for rng, expected in zip([shuffle, cpu_rng, *cuda_rngs, mps_rng], saved, strict=True):
+        assert torch.equal(rng.get_state(), expected)
+    np.testing.assert_array_equal(restored_numpy.random_sample(10), numpy_rng.random_sample(10))
 
 
 # ------------------------------------------------------------------ train boosted trees more
