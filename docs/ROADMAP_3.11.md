@@ -85,8 +85,16 @@
   follow your confirmation.
 
 ## Fixed along the way
-- A remote resume test waited for epochs the stopped run already had; it now waits for
-  the resumed script to start.
+- **Resumed SSH and Colab runs could replay their last attempt.** A resumed run reuses
+  its folder on the host (or in Drive). The follower could read the stopped attempt's
+  events and exit code before the new launcher cleared them, which ended the new
+  attempt at once. They are now removed before the launcher starts. CI's SSH resume
+  test caught it, and it now checks the race every time.
+- **Copies of a checkpointed model ran the original's layers.** With gradient
+  checkpointing, EMA's and SWA's averaged models (and the quantization-aware copy)
+  called the original layers. The wrapper is now bound to its own layer.
+- **A Keras compile retry restores the random state too**, so dropout draws as if the
+  run had never compiled.
 
 ## Still open
 - Making the Windows test jobs required checks is your call (a ruleset change).

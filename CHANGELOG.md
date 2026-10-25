@@ -38,6 +38,10 @@ this release.
   so OpenVINO runs it (identical results).
 
 ### Fixed
+- A resumed SSH or Colab run no longer replays the stopped attempt's events and ends at
+  once (the previous attempt's progress files are removed before it starts).
+- With gradient checkpointing, EMA's and SWA's averaged models were scored with the
+  live weights; copies of a checkpointed model now run their own layers.
 - The memory fix no longer offers sharding with EMA or SWA.
 
 ## 3.10.0
