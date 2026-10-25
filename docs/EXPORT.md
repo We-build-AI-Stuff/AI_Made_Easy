@@ -124,6 +124,7 @@ rules:
 | Spline coupling (flows) | ExecuTorch, Core ML, OpenVINO | data-dependent shapes |
 | Glow's invertible 1x1 convolution | Core ML, OpenVINO | `diag` has no converter |
 | Hyena | ExecuTorch, Core ML, OpenVINO | FFTs (complex numbers) |
+| Retention (RetNet) | OpenVINO | group norm over a flattened tensor has no CPU kernel |
 | Seq2seq transformer | ExecuTorch | token-by-token decoding loop |
 | FT-Transformer | ExecuTorch int8 | categorical ids read from the float row |
 | Mask2Former | ExecuTorch int8 | integer index tensors |

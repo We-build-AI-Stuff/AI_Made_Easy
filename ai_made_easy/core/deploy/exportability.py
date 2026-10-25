@@ -64,6 +64,9 @@ _BLOCKS = {
     "seq.rwkv_block": Blocker(ON_DEVICE, "the RWKV recurrence runs as a loop with running "
                               "maxima that the ExecuTorch runtime rejects: export to ONNX or "
                               "TorchScript"),
+    "seq.retention": Blocker(("openvino",), "retention normalizes its heads with a group "
+                             "norm over a flattened (2-D) tensor, which OpenVINO's CPU "
+                             "runtime can't run: export to ONNX, TorchScript or ExecuTorch"),
     "seq.hyena": Blocker((*ON_DEVICE, "coreml", "openvino"), "the Hyena long convolution "
                          "uses FFTs (complex numbers), which ExecuTorch, Core ML and "
                          "OpenVINO's CPU runtime can't run: export to ONNX or TorchScript"),
