@@ -10,11 +10,13 @@ ai_made_easy/
 │   ├── migrate.py        project-file schema migrations
 │   ├── blocks/           model-flow blocks (one module per family)
 │   ├── codegen/          PyTorch + Keras emitters, helpers, ONNX/TorchScript
-│   ├── training/         dataset/preprocessing/loss/optimizer catalogs, spec,
-│   │                     PyTorch + Keras training-script templates, metrics code
+│   ├── training/         dataset/preprocessing catalog, catalog/ (losses, optimizers,
+│   │                     schedulers, metrics, trainer), spec, PyTorch + Keras
+│   │                     training-script templates, metrics code
 │   ├── classic/          scikit-learn / boosting estimators and pipeline codegen
 │   ├── targets.py        the single export-target table (UI, CLI, MCP)
-│   ├── api.py            headless facade used by the CLI, MCP server and web server
+│   ├── api/              headless facade used by the CLI, MCP server and web server
+│   │                     (one module per area; everything importable from core.api)
 │   ├── paths.py          $AIME_HOME (default ~/.aime) and its sub-folders
 │   ├── runs/             persistent run history: run.json, epochs.jsonl, artefacts
 │   ├── runner/           RunManager, run backends (local, SSH, Kaggle, Colab, Modal, Docker)
@@ -34,9 +36,9 @@ ai_made_easy/
 │   ├── features/         panels and dialogs (presentation only)
 │   └── services/         graph settle pipeline, processes, exports, projects
 ├── worker/               subprocess wrapper streaming JSON training events
-├── mcp/                  MCP server over core/api.py
+├── mcp/                  MCP server over core/api
 ├── server/               FastAPI REST + WebSocket server and the built web UI (static/)
-└── cli.py                headless command line
+└── cli/                  headless command line: parser, dispatch, commands by area
 web/                      React + TypeScript + Vite + React Flow frontend (built into server/static)
 ```
 
@@ -392,7 +394,7 @@ pipeline in the training environment.
 
 ## Web server
 
-`server/app.py` exposes `core/api.py` over REST (`/api/...`) and streams run
+`server/app.py` exposes `core/api` over REST (`/api/...`) and streams run
 events over `WS /api/runs/{id}/events`. It also serves the built frontend with
 an SPA fallback. When `AIME_WEB_TOKEN` is set, every request needs the bearer
 token. The frontend keeps the project as React Flow nodes / edges, converts to

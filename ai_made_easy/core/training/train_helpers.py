@@ -1,7 +1,7 @@
 """Source of the PyTorch optimizers and losses that are not in torch.
 
 ``TRAIN_HELPERS`` maps a helper name (a component's ``meta["torch_helper"]``) to class
-source that code generation emits into the training script; catalog.py re-exports it.
+source that code generation emits into the training script; the catalog package re-exports it.
 """
 from __future__ import annotations
 

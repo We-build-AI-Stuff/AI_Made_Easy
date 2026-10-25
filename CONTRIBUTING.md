@@ -34,7 +34,7 @@ new block needs no UI code.
 |---|---|
 | A layer (dense, conv, attention, ...) | `ai_made_easy/core/blocks/<group>.py`, built with `nn_block` from `_dsl.py` |
 | A family's block (vision head, forecaster, distribution, ...) | `ai_made_easy/core/<family>/blocks.py`, registered by its `register_all()` |
-| A dataset, preprocessing or training block | `core/training/data_catalog.py` or `core/training/catalog.py` |
+| A dataset, preprocessing or training block | `core/training/data_catalog.py` or `core/training/catalog/` (losses.py, optimizers.py, …) |
 
 The type id's prefix is the family namespace (`vision.fpn`, `forecast.tft`, `ppl.mv_normal`):
 the coverage report and FAMILIES.md group blocks by it.
