@@ -196,7 +196,7 @@ def test_keras_retries_from_the_state_before_compiling(tmp_path):
     if keras.backend.backend() != "torch":
         pytest.skip("checked on the torch backend")
     plain = tmp_path / "plain"
-    _ok(_run(plain, _script(_design(epochs=2), plain, "keras")))
+    _ok(_run(plain, _script(_dropout(_design(epochs=2)), plain, "keras")))
     retried = tmp_path / "retried"
     broken = ("import keras\n"
               "real = keras.Model.fit\n"
@@ -212,9 +212,19 @@ def test_keras_retries_from_the_state_before_compiling(tmp_path):
               "    print(f'retry: step {int(self.optimizer.iterations)}, momentum {moved}', flush=True)\n"
               "    return real(self, x, y, *args, **kwargs)\n"
               "keras.Model.fit = fit")
-    out = _ok(_run(retried, _script(_design(epochs=2, compile=True), retried, "keras"),
-                   broken))
+    out = _ok(_run(retried, _script(_dropout(_design(epochs=2, compile=True)), retried,
+                                    "keras"), broken))
     assert "jit_compile did not work" in out
     assert "retry: step 0, momentum 0.0" in out       # the failed step's momentum is gone
-    read = lambda f: json.loads((f / "metrics.json").read_text(encoding="utf-8"))  # noqa: E731
-    assert read(retried) == read(plain)
+    for name in ("metrics.json", "predictions.json"):   # and dropout draws as if never compiled
+        read = lambda f: json.loads((f / name).read_text(encoding="utf-8"))  # noqa: E731
+        assert read(retried) == read(plain), name
+
+
+def _dropout(design: dict) -> dict:
+    """The tiny design with dropout after its hidden layer (a layer that draws randomly)."""
+    design["nodes"].append({"id": "drop", "type": "core.dropout", "params": {"p": 0.3},
+                            "position": [0, 0]})
+    design["edges"] = [e for e in design["edges"] if e["from"] != "act/out"]
+    design["edges"] += [{"from": "act/out", "to": "drop/in"}, {"from": "drop/out", "to": "d2/in"}]
+    return design
