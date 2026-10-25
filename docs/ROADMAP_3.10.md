@@ -18,10 +18,15 @@
 - **Compile:** `torch.compile` with a fallback that says why. **Done.**
 - **Gradient checkpointing:** the same results with less memory. Batch-norm layers keep
   their activations (recomputing them would update their statistics twice). The budget
-  estimates about two layers' activations and a third more step time. **Done.**
+  counts what the script really keeps: a wrapped layer's output, plus one layer's inner
+  values while it is recomputed (flat networks save little), and a third more step time.
+  **Done.**
 - **Several GPUs:** one forked process per GPU with DistributedDataParallel (gloo on CPU,
-  NCCL on GPUs), a distributed sampler and an averaged training loss. The first process
-  reports and saves. K-fold and metric-learning runs use one GPU. **Done.**
+  NCCL on GPUs), a distributed sampler and an averaged training loss. Every process
+  takes the first one's validation loss, so they stop early and change the learning rate
+  together. GPUs are counted in a child process so CUDA isn't started before the fork.
+  The first process reports and saves. K-fold and metric-learning runs use one GPU.
+  **Done.**
 - Keras scripts say these settings apply to PyTorch only. **Done.**
 
 ## Phase 2 — features (#77)
@@ -34,10 +39,15 @@
 - **OpenVINO export** (`openvino` extra). Models are compiled in float32 and must match
   PyTorch. The tests run on x86 only: OpenVINO's ARM plugin lacks group normalization and
   drifts in precision. Detection and graph models are not supported (they need more than
-  one input tensor). **Done.**
+  one input tensor), nor is retention (its group norm over a flattened tensor has no CPU
+  kernel). **Done.**
 - **PyTorch or Keras in the apps.** A design's framework choice is honoured everywhere,
-  and the Training panel offers the frameworks every layer supports. With it, the Keras
+  and the Training panel offers the frameworks every layer supports. A saved choice that a
+  later block can't follow falls back to one that every layer has. With it, the Keras
   learning-rate finder is reachable from both apps. **Done.**
+- CodeRabbit's reviews of #76 and #77 found seven issues, all fixed in #77 (the items
+  above on validation loss, GPU counting, the checkpointed memory estimate and the saved
+  framework, plus the fairness ratio, exact 10-point gaps and a stale framework list).
 
 ## Phase 3 — upkeep (#78)
 - The desktop's canvas actions move to `ui/context_canvas.py` and the web designer's
