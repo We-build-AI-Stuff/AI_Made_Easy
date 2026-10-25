@@ -2,6 +2,7 @@
 // server's user-facing message.
 import type {
   AutoMLStarted,
+  Counterfactuals,
   BackendList,
   BackendTest,
   BlockDef,
@@ -136,6 +137,10 @@ export const api = {
   runDiff: (id: string, graph: Project) => post<DesignDiff>(`/runs/${id}/diff`, { graph }),
   runSamples: (id: string) => get<RunSamples>(`/runs/${id}/samples`),
   tryForm: (id: string) => get<TryForm>(`/runs/${id}/try`),
+  /** 3.11: the smallest changes to a table row that change the prediction. */
+  whatWouldChange: (id: string, body: { row: Record<string, unknown>; desired?: string;
+                                        target?: number; locked?: string[] }) =>
+    post<Counterfactuals>(`/runs/${id}/counterfactuals`, body),
   tryRun: (id: string, inputs: unknown[], explain = false) =>
     post<{ predictions: Record<string, unknown>[]; latency_ms: number }>(`/runs/${id}/try`,
                                                                           { inputs, explain }),

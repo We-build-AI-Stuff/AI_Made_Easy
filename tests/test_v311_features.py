@@ -604,3 +604,161 @@ def test_a_trained_llama_exports_to_gguf_from_its_package(tmp_path):
     assert entry["ok"], entry
     assert "BPE merges" in entry["note"] and entry["note"].startswith("matches PyTorch")
     assert (tmp_path / "pkg" / entry["file"]).is_file()
+
+
+# ------------------------------------------------------------ Phase 2: what would change it
+def _columns() -> dict:
+    return {"income": {"numeric": True, "whole": False, "spread": 10.0,
+                       "values": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]},
+            "debt": {"numeric": True, "whole": False, "spread": 5.0,
+                     "values": [0.0, 5.0, 10.0, 15.0, 20.0]},
+            "region": {"numeric": False, "spread": 1.0, "values": ["north", "south"]}}
+
+
+def _model(needs_both: bool):
+    """Approved when income >= 40 and (for needs_both) debt <= 5 too."""
+    def predict(rows):
+        out = []
+        for r in rows:
+            score = (r["income"] >= 40) + (not needs_both or r["debt"] <= 5)
+            p = 0.9 if score == 2 else 0.4 if score == 1 else 0.1
+            out.append({"label": "yes" if p >= 0.5 else "no",
+                        "probabilities": {"no": 1 - p, "yes": p}})
+        return out
+    return predict
+
+
+def test_the_smallest_single_changes_come_first():
+    from ai_made_easy.core.counterfactual import search
+
+    row = {"income": 25.0, "debt": 2.0, "region": "north"}
+    found = search(_model(False), row, _columns())
+    assert found["goal"] == "predicted yes (now no)" and found["found"]
+    first = found["single"][0]
+    assert first["changes"] == [{"column": "income", "from": 25.0, "to": 40.0}]
+    assert first["distance"] == pytest.approx(1.5) and first["prediction"]["label"] == "yes"
+    assert len(found["single"]) == 1 and found["combined"] is None    # only income can
+
+
+def test_a_few_changes_together_when_one_is_not_enough():
+    from ai_made_easy.core.counterfactual import search
+
+    row = {"income": 25.0, "debt": 18.0, "region": "south"}
+    found = search(_model(True), row, _columns())
+    assert not found["single"]
+    changed = {c["column"]: c["to"] for c in found["combined"]["changes"]}
+    assert changed.keys() == {"income", "debt"}                  # region isn't needed
+    assert changed["income"] >= 40 and changed["debt"] <= 5
+    assert found["combined"]["prediction"]["label"] == "yes"
+    locked = search(_model(True), row, _columns(), locked=["debt"])
+    assert not locked["found"] and locked["locked"] == ["debt"]
+
+
+def test_regressors_reach_a_value_and_bad_requests_say_why():
+    from ai_made_easy.core.counterfactual import CounterfactualError, search
+
+    def price(rows):
+        return [{"prediction": 2.0 * r["income"] - r["debt"]} for r in rows]
+
+    row = {"income": 20.0, "debt": 10.0, "region": "north"}
+    found = search(price, row, _columns(), target=60.0)
+    assert found["goal"] == "a prediction at least 60 (now 30)"
+    assert found["single"][0]["changes"][0]["column"] == "income"
+    assert all(e["prediction"]["prediction"] >= 60 for e in found["single"])
+    with pytest.raises(CounterfactualError, match="give a target value"):
+        search(price, row, _columns())
+    with pytest.raises(CounterfactualError, match="every column is locked"):
+        search(_model(False), row, _columns(), locked=list(_columns()))
+    with pytest.raises(CounterfactualError, match="pick a class to reach"):
+        search(_model(False), row, _columns(), desired="maybe")
+
+
+@pytest.mark.slow
+def test_a_trained_network_says_what_would_change_its_prediction(isolated_home, tmp_path):
+    """The labels are a + b > 1: raising a or b far enough flips a 'no', and the run's
+    own predictor agrees when asked about the changed row."""
+    pytest.importorskip("torch")
+    from test_v38_features import _network, _region_table
+
+    from ai_made_easy.core import api
+    from ai_made_easy.core.runner.manager import RunManager
+    from ai_made_easy.core.runs.history import RunHistory
+
+    mgr = RunManager(RunHistory(tmp_path / "runs"))
+    api.set_manager(mgr)
+    try:
+        run_id = api.start_training(_network(_region_table(tmp_path / "t.csv")))["run_id"]
+        assert mgr.wait(run_id, 600)["state"] == "finished"
+        row = {"a": 0.2, "b": 0.3}
+        found = api.what_would_change(run_id, row)
+        assert found["prediction"]["label"] == "0" and found["single"]
+        assert {e["changes"][0]["column"] for e in found["single"]} <= {"a", "b"}
+        for entry in found["single"]:
+            change = entry["changes"][0]
+            again = api.try_run(run_id, [{**row, change["column"]: change["to"]}])
+            assert again["predictions"][0]["label"] == "1"
+        locked = api.what_would_change(run_id, row, locked=["a"])
+        assert all(e["changes"][0]["column"] == "b" for e in locked["single"])
+        with pytest.raises(api.ApiError, match="no such column to lock"):
+            api.what_would_change(run_id, row, locked=["c"])
+        pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+
+        from ai_made_easy.server.app import create_app
+
+        got = TestClient(create_app()).post(f"/api/runs/{run_id}/counterfactuals",
+                                            json={"row": row, "locked": ["b"]})
+        assert got.status_code == 200
+        assert {e["changes"][0]["column"] for e in got.json()["single"]} == {"a"}
+        _desktop_finds_changes(mgr, run_id)
+    finally:
+        api.try_service().close()
+        api.set_manager(None)
+
+
+def _desktop_finds_changes(mgr, run_id: str) -> None:  # noqa: ANN001
+    pytest.importorskip("PySide6")
+    import time
+
+    from PySide6 import QtCore, QtWidgets
+
+    from ai_made_easy.ui.app import _ensure_qt_plugin_path
+    from ai_made_easy.ui.features.try_dialog import TryDialog
+
+    _ensure_qt_plugin_path()
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    dialog = TryDialog(None, mgr.history, run_id)
+
+    def wait(check, seconds=60.0) -> None:  # noqa: ANN001
+        deadline = time.time() + seconds
+        while not check() and time.time() < deadline:
+            app.processEvents()
+            QtCore.QThread.msleep(20)
+        assert check()
+
+    wait(lambda: dialog.predict_btn.isEnabled())
+    dialog._fields["a"].setText("0.2")
+    dialog._fields["b"].setText("0.3")
+    dialog.predict()
+    wait(lambda: not dialog.changes_box.isHidden())
+    assert dialog.goal.currentData() == "1" and dialog.target.isHidden()
+    dialog.locks.item(0).setCheckState(QtCore.Qt.CheckState.Checked)      # keep a
+    dialog.find_changes()
+    wait(lambda: "edited rows checked" in dialog.changes.toPlainText())
+    text = dialog.changes.toPlainText()
+    assert "Goal: predicted 1 (now 0)." in text and "  b 0.3 → " in text and "  a " not in text
+    dialog.deleteLater()
+
+
+def test_the_desktop_describes_changes():
+    from ai_made_easy.ui.features.try_dialog import describe_changes
+
+    text = describe_changes({
+        "goal": "predicted yes (now no)", "predictions_checked": 14, "combined": None,
+        "single": [{"changes": [{"column": "income", "from": 25.0, "to": 40.0}],
+                    "prediction": {"label": "yes", "probabilities": {"no": 0.1, "yes": 0.9}},
+                    "distance": 1.5}]})
+    assert text.splitlines() == ["Goal: predicted yes (now no).",
+                                 "One change is enough, smallest first:",
+                                 "  income 25 → 40 · predicts yes (90%)",
+                                 "14 edited rows checked."]

@@ -1207,6 +1207,22 @@ def try_run(run_id: str, inputs: list, explain: bool = False) -> dict:
         raise ApiError(str(exc)) from exc
 
 
+def what_would_change(run_id: str, row: dict, desired: str | None = None,
+                      target: float | None = None, locked: list[str] | None = None) -> dict:
+    """Counterfactuals of one table row for a finished run: the smallest single changes
+    that give ``desired`` (another class; default the runner-up) or reach ``target`` (a
+    regressor's value), else a few changes together. ``locked`` columns stay as they
+    are. Asks the run's own predictor on this machine."""
+    from ai_made_easy.core import counterfactual, tryit
+
+    try:
+        return counterfactual.what_would_change(try_service(), manager().history, run_id,
+                                                row, desired=desired, target=target,
+                                                locked=locked or ())
+    except (counterfactual.CounterfactualError, tryit.TryError) as exc:
+        raise ApiError(str(exc)) from exc
+
+
 def try_file(run_id: str, filename: str, data: bytes) -> dict:
     """Predictions of a finished run for every input in a file (a CSV table, a text file,
     or a zip of images or WAV clips) as CSV text: ``{"csv", "rows", "filename"}``."""

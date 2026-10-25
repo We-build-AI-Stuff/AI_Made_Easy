@@ -386,6 +386,20 @@ def export_formats(run_id: str) -> str:
 
 
 @mcp.tool()
+def what_would_change(run_id: str, row: dict, desired: str | None = None,
+                      target: float | None = None, locked: list[str] | None = None) -> str:
+    """Counterfactuals for a finished run trained on a table: given one row ({column:
+    value}), the smallest changes that make it predict ``desired`` (a class; default the
+    runner-up) or reach ``target`` (a regressor's value). ``locked`` columns stay fixed.
+    Values tried come from the run's table; the run's own model answers."""
+    try:
+        return json.dumps(api.what_would_change(run_id, row, desired, target, locked),
+                          default=str)
+    except (api.ApiError, KeyError) as exc:
+        return _err(exc)
+
+
+@mcp.tool()
 def deploy_run(run_id: str, out_dir: str, formats: list[str] | None = None) -> str:
     """Build a model-server package (FastAPI app, Dockerfile, pinned requirements) from a
     finished training run, with optional exports: onnx, onnx_int8, torchscript, coreml,

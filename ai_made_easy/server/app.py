@@ -352,6 +352,14 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
     def try_run(run_id: str, payload: dict = Body(...)) -> dict:  # noqa: B008
         return api.try_run(run_id, payload.get("inputs"), explain=bool(payload.get("explain")))
 
+    @app.post("/api/runs/{run_id}/counterfactuals", dependencies=guard)
+    async def what_would_change(run_id: str, payload: dict = Body(...)) -> dict:  # noqa: B008
+        """What would change the prediction for one table row."""
+        target = payload.get("target")
+        return await asyncio.to_thread(
+            api.what_would_change, run_id, payload.get("row") or {}, payload.get("desired"),
+            float(target) if target not in (None, "") else None, payload.get("locked") or [])
+
     @app.post("/api/runs/{run_id}/try/file", dependencies=guard)
     async def try_file(run_id: str, file: UploadFile = File(...)) -> Response:  # noqa: B008
         """Predictions for a whole file of inputs, as a CSV download."""

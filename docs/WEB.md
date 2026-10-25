@@ -83,6 +83,7 @@ The main groups:
 | `POST /api/data/profile`, `/issues`, `/split`, `/augment` | data workspace |
 | `POST /api/data/upload` | a dropped data file: stored, its facts detected for the wizard |
 | `GET /api/runs/{id}/explain`, `POST /api/runs/{id}/diff` | feature importance; what changed since a run |
+| `GET/POST /api/runs/{id}/try`, `POST /api/runs/{id}/counterfactuals` | try a finished run on your input; what would change a table row's prediction (`row`, optional `desired`, `target`, `locked`) |
 
 ## Develop the frontend
 

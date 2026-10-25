@@ -531,6 +531,24 @@ export interface ExportFormat {
 }
 
 /** What a finished run takes, to build its Try it form (3.5). */
+/** 3.11: what would change a table row's prediction (POST /api/runs/{id}/counterfactuals). */
+export interface Counterfactual {
+  changes: { column: string; from: unknown; to: unknown }[];
+  distance: number;
+  prediction: Record<string, unknown>;
+}
+
+export interface Counterfactuals {
+  run_id: string;
+  prediction: Record<string, unknown>;
+  goal: string;
+  single: Counterfactual[];
+  combined: Counterfactual | null;
+  locked: string[];
+  predictions_checked: number;
+  found: boolean;
+}
+
 export interface TryForm {
   run_id: string;
   task: string | null;

@@ -7,6 +7,9 @@ worker thread, so the window stays responsive.
 3.6: "Predict a file…" runs the model on every input of a file (a CSV, a text file or a zip
 of images or clips) and saves the predictions as CSV; image classifiers can show their
 Grad-CAM heatmap next to the prediction.
+
+3.11: for a table row, "What would change it?" lists the smallest edits to the row that
+make the model predict another class (or reach a value), with columns you can lock.
 """
 from __future__ import annotations
 
@@ -42,10 +45,38 @@ def describe_prediction(pred: dict) -> str:
     return json.dumps(pred, indent=1, default=str)
 
 
+def describe_changes(found: dict) -> str:
+    """Counterfactuals as plain text (both apps say the same)."""
+    def one(entry: dict) -> str:
+        p = entry["prediction"]
+        edits = " and ".join(f"{c['column']} {_shown(c['from'])} → {_shown(c['to'])}"
+                             for c in entry["changes"])
+        label = p.get("label", _shown(p.get("prediction")))
+        probs = p.get("probabilities") or {}
+        sure = f" ({probs[str(label)] * 100:.0f}%)" if str(label) in probs else ""
+        return f"  {edits} · predicts {label}{sure}"
+
+    lines = [f"Goal: {found['goal']}."]
+    if found["single"]:
+        lines += ["One change is enough, smallest first:"] + [one(e) for e in found["single"]]
+    elif found["combined"]:
+        lines += ["No single change is enough; together these are:", one(found["combined"])]
+    else:
+        lines.append("No change of up to three columns reaches the goal with values from the "
+                     "training table.")
+    lines.append(f"{found['predictions_checked']} edited rows checked.")
+    return "\n".join(lines)
+
+
+def _shown(v) -> str:  # noqa: ANN001
+    return f"{v:.4g}" if isinstance(v, float) else str(v)
+
+
 class TryDialog(QtWidgets.QDialog):
     _loaded = QtCore.Signal(object, str)     # form | None, error
     _answered = QtCore.Signal(object, str)   # result | None, error
     _filed = QtCore.Signal(object, str)      # file result | None, error
+    _changed = QtCore.Signal(object, str)    # counterfactuals | None, error
 
     def __init__(self, parent, history, run_id: str, service=None):  # noqa: ANN001
         super().__init__(parent)
@@ -83,6 +114,7 @@ class TryDialog(QtWidgets.QDialog):
         self.cam.setVisible(False)
         results.addWidget(self.cam)
         layout.addLayout(results, 1)
+        self._build_changes(layout)
         buttons = QtWidgets.QDialogButtonBox()
         self.predict_btn = buttons.addButton("Predict",
                                              QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole)
@@ -101,7 +133,40 @@ class TryDialog(QtWidgets.QDialog):
         self._loaded.connect(self._on_loaded)
         self._answered.connect(self._on_answered)
         self._filed.connect(self._on_filed)
+        self._changed.connect(self._on_changed)
         threading.Thread(target=self._load, daemon=True).start()
+
+    def _build_changes(self, layout: QtWidgets.QVBoxLayout) -> None:
+        """What would change it (3.11): hidden until a table row has a prediction."""
+        self.changes_box = QtWidgets.QGroupBox("What would change it?")
+        box = QtWidgets.QFormLayout(self.changes_box)
+        note = QtWidgets.QLabel("The model is asked about edited copies of this row, with "
+                                "values your training table has. It shows what the model "
+                                "does, not why.")
+        note.setWordWrap(True)
+        note.setObjectName("blockMeta")
+        box.addRow(note)
+        self.goal = QtWidgets.QComboBox()
+        self.goal.setAccessibleName("Make it predict")
+        box.addRow("Make it predict", self.goal)
+        self.target = QtWidgets.QLineEdit()
+        self.target.setAccessibleName("Reach the value")
+        self.target.setPlaceholderText("a value for the prediction to reach")
+        box.addRow("Reach the value", self.target)
+        self.locks = QtWidgets.QListWidget()
+        self.locks.setAccessibleName("Columns to keep as they are")
+        self.locks.setMaximumHeight(90)
+        box.addRow("Keep as they are", self.locks)
+        self.change_btn = QtWidgets.QPushButton("Find Changes")
+        self.change_btn.clicked.connect(self.find_changes)
+        box.addRow(self.change_btn)
+        self.changes = QtWidgets.QPlainTextEdit(readOnly=True)
+        self.changes.setAccessibleName("Changes that change the prediction")
+        self.changes.setMaximumHeight(120)
+        box.addRow(self.changes)
+        self.changes_box.setVisible(False)
+        layout.addWidget(self.changes_box)
+        self._row: dict | None = None
 
     # ------------------------------------------------------------------ loading
     def _load(self) -> None:
@@ -204,12 +269,74 @@ class TryDialog(QtWidgets.QDialog):
                 if isinstance(p, dict) and "gradcam" in p]
         text = "\n\n".join(describe_prediction(p) for p in result["predictions"])
         self.result.setPlainText(f"{text}\n\n{result['latency_ms']} ms")
+        self._offer_changes(result["predictions"][0] if result["predictions"] else None)
         self.cam.setVisible(bool(cams))
         if cams:
             image = QtGui.QImage.fromData(base64.b64decode(cams[0]))
             self.cam.setPixmap(QtGui.QPixmap.fromImage(image).scaled(
                 224, 224, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
                 QtCore.Qt.TransformationMode.SmoothTransformation))
+
+    # ------------------------------------------------------------------ what would change it
+    def _offer_changes(self, pred) -> None:  # noqa: ANN001
+        probs = pred.get("probabilities") if isinstance(pred, dict) else None
+        numeric = isinstance(pred, dict) and isinstance(pred.get("prediction"), (int, float))
+        if not self._fields or not (isinstance(probs, dict) or numeric):
+            self.changes_box.setVisible(False)
+            return
+        self._row = self.inputs()[0]
+        self.goal.clear()
+        if isinstance(probs, dict):
+            others = sorted((c for c in probs if c != str(pred.get("label"))),
+                            key=lambda c: -probs[c])
+            for c in others:
+                self.goal.addItem(c + ("  (the runner-up)" if c == others[0] else ""), c)
+        self.goal.setVisible(isinstance(probs, dict))
+        self.changes_box.layout().labelForField(self.goal).setVisible(isinstance(probs, dict))
+        self.target.setVisible(numeric)
+        self.changes_box.layout().labelForField(self.target).setVisible(numeric)
+        if self.locks.count() != len(self._fields):
+            self.locks.clear()
+            for col in self._fields:
+                item = QtWidgets.QListWidgetItem(col)
+                item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(QtCore.Qt.CheckState.Unchecked)
+                self.locks.addItem(item)
+        self.changes.clear()
+        self.changes_box.setVisible(True)
+
+    def find_changes(self) -> None:
+        locked = [self.locks.item(i).text() for i in range(self.locks.count())
+                  if self.locks.item(i).checkState() == QtCore.Qt.CheckState.Checked]
+        target = None
+        if self.target.isVisible():
+            try:
+                target = float(self.target.text())
+            except ValueError:
+                self.changes.setPlainText("⚠ give a number for the prediction to reach")
+                return
+        desired = self.goal.currentData() if self.goal.isVisible() else None
+        self.change_btn.setEnabled(False)
+        self.changes.setPlainText("Searching…")
+        threading.Thread(target=self._ask_changes, args=(self._row, desired, target, locked),
+                         daemon=True).start()
+
+    def _ask_changes(self, row: dict, desired, target, locked: list) -> None:  # noqa: ANN001
+        from ai_made_easy.core import counterfactual
+
+        try:
+            self._changed.emit(counterfactual.what_would_change(
+                self._service, self._history, self._run_id, row, desired=desired,
+                target=target, locked=locked), "")
+        except Exception as exc:  # noqa: BLE001 — shown in the dialog
+            self._changed.emit(None, str(exc))
+
+    def _on_changed(self, found: dict | None, error: str) -> None:
+        self.change_btn.setEnabled(True)
+        if found is None:
+            self.changes.setPlainText(f"⚠ {error}")
+            return
+        self.changes.setPlainText(describe_changes(found))
 
     # ------------------------------------------------------------------ a whole file
     def _choose_batch(self) -> None:
