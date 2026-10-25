@@ -10,8 +10,9 @@ Summary can show estimate vs measured once a real run has calibrated them.
   sequence terms; element-wise blocks cost one op per output value.
 * Training memory: weights + gradients + optimizer state for trainable
   weights, plus saved activations × batch (halved by mixed precision), plus the
-  device's runtime overhead. Gradient checkpointing keeps about two layers'
-  activations instead of every layer's, and adds a forward pass to each step.
+  device's runtime overhead. Gradient checkpointing keeps only the input of each
+  layer it wraps (weights, no batch norm) plus one such layer's activations while it
+  is recomputed, and adds a forward pass to each step.
 * Inference latency (batch 1): compute time at a realistic fraction of the
   device's peak + memory traffic over its bandwidth + a small launch cost per
   kernel (one per block; composite blocks declare ``meta["kernels"]``).
@@ -26,6 +27,7 @@ Zero means "no limit" (for memory: the device's memory). Pure Python, Qt-free.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -151,6 +153,8 @@ class LayerCost:
     activations: int        # values saved for backward (per sample)
     trainable: bool = True
     kernels: int = 1        # kernel launches in one forward pass
+    inputs: int = 0         # values per sample coming in
+    composite: bool = False  # reports its own cost (may hold batch norm)
 
 
 @dataclass
@@ -181,6 +185,21 @@ class Estimate:
     def model_bytes(self) -> int:
         return self.params * self.value_bytes
 
+    def checkpointed_activations(self) -> int:
+        """Values per sample kept for backward with gradient checkpointing, as the script
+        does it: a layer with trainable weights and no batch norm keeps only its input,
+        and one such layer at a time recomputes its own; other layers keep theirs."""
+        kept, recomputed = 0, 0
+        for layer in self.layers:
+            if not layer.trainable and layer.type_id != "core.input":
+                continue                    # frozen: keeps nothing for backward
+            if layer.params and not layer.composite and "batch_norm" not in layer.type_id:
+                kept += min(layer.inputs, layer.activations)   # its input, unless counted before
+                recomputed = max(recomputed, layer.activations)
+            else:
+                kept += layer.activations
+        return kept + recomputed
+
     def train_memory_bytes(self, batch_size: int | None = None,
                            mixed_precision: bool | None = None) -> int:
         batch = self.batch_size if batch_size is None else batch_size
@@ -192,8 +211,8 @@ class Estimate:
         grads = self.trainable_params * 4
         states = self.trainable_params * 4 * self.optimizer_states
         saved = self.activations
-        if self.checkpointing:   # one layer recomputed at a time, plus its neighbours' inputs
-            saved = min(saved, 2 * max((layer.activations for layer in self.layers), default=0))
+        if self.checkpointing:
+            saved = min(saved, self.checkpointed_activations())
         acts = saved * batch * (2 if amp else 4) * SAVED_ACTIVATION_FACTOR
         overhead = (self.device.overhead_gb if self.device else 0.0) * GB
         return int(weights + grads + states + acts + overhead)
@@ -342,7 +361,10 @@ def estimate(graph, device: str | Device | None = None) -> Estimate:  # noqa: AN
         kernels = (defn.meta or {}).get("kernels") if isinstance(defn.meta, dict) else None
         kernels = int(kernels(resolved)) if callable(kernels) and in_shapes else 1
         est.layers.append(LayerCost(node.instance_id, defn.display_name, node.type_id,
-                                    out_shape, params, flops, acts, trainable, kernels))
+                                    out_shape, params, flops, acts, trainable, kernels,
+                                    inputs=sum(math.prod(sh) for sh in in_shapes if sh),
+                                    composite=callable(cost) or
+                                    node.type_id == "core.pretrained_backbone"))
         est.params += params
         est.trainable_params += params if trainable else 0
         est.flops += flops
