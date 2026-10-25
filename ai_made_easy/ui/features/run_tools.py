@@ -185,6 +185,17 @@ class GroupsDialog(QtWidgets.QDialog):
         self.fairness.setWordWrap(True)
         self.fairness.setAccessibleName("Fairness between groups")
         layout.addWidget(self.fairness)
+        self.thresholds_note = QtWidgets.QLabel("")
+        self.thresholds_note.setWordWrap(True)
+        layout.addWidget(self.thresholds_note)
+        self.thresholds = QtWidgets.QTableWidget(0, 5)
+        self.thresholds.setHorizontalHeaderLabels(
+            ["Group", "Threshold", "True positives", "False positives", "Accuracy"])
+        self.thresholds.horizontalHeader().setStretchLastSection(True)
+        self.thresholds.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.thresholds.setAccessibleName("A threshold per group, before and after")
+        self.thresholds.hide()
+        layout.addWidget(self.thresholds)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -241,6 +252,7 @@ class GroupsDialog(QtWidgets.QDialog):
                                         f"on {key}.")
         fair = result.get("fairness")
         self.fairness.setText(f"Fairness: {fair['summary']}" if fair else "")
+        self._show_thresholds(result.get("mitigation"), result.get("column", "Group"))
         self.table.setHorizontalHeaderLabels([result.get("column", "Group"), "Rows", key,
                                               "vs all"])
         rows = [{"value": "all test rows", **result.get("overall", {})}, *result["groups"]]
@@ -258,6 +270,34 @@ class GroupsDialog(QtWidgets.QDialog):
                     font.setBold(True)
                     item.setFont(font)
                 self.table.setItem(i, j, item)
+
+    def _show_thresholds(self, found: dict | None, column: str) -> None:
+        """A threshold per group: each group's rates at 0.5, then with its threshold."""
+        self.thresholds.setVisible(bool(found))
+        if not found:
+            self.thresholds_note.setText("")
+            return
+        self.thresholds_note.setText(
+            f"A threshold per group: {found.get('summary', '')}\nBefore → after, on "
+            f"{found['before']['overall']['count']} rows the thresholds were not fitted on; "
+            "saved as group_thresholds.json in the scoring run.")
+        self.thresholds.setHorizontalHeaderLabels(
+            [column, "Threshold", "True positives", "False positives", "Accuracy"])
+
+        def pct(v) -> str:  # noqa: ANN001
+            return "—" if v is None else f"{v:.0%}"
+
+        after = {g["value"]: g for g in found["after"]["groups"]}
+        self.thresholds.setRowCount(len(found["before"]["groups"]))
+        for i, g in enumerate(found["before"]["groups"]):
+            a = after.get(g["value"], {"rates": {"tpr": [None], "fpr": [None]},
+                                       "accuracy": None})
+            cells = [g["value"], f"{found['thresholds'].get(g['value'], 0.5):.2f}",
+                     f"{pct(g['rates']['tpr'][0])} → {pct(a['rates']['tpr'][0])}",
+                     f"{pct(g['rates']['fpr'][0])} → {pct(a['rates']['fpr'][0])}",
+                     f"{pct(g['accuracy'])} → {pct(a['accuracy'])}"]
+            for j, text in enumerate(cells):
+                self.thresholds.setItem(i, j, QtWidgets.QTableWidgetItem(text))
 
     def reject(self) -> None:
         self.timer.stop()

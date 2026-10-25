@@ -11,6 +11,7 @@ from ai_made_easy.core.codegen import CodegenError, sanitize_identifier
 from ai_made_easy.core.graph import Graph, ValidationIssue
 from ai_made_easy.core.training import catalog as tcat
 from ai_made_easy.core.training import data_catalog as dcat
+from ai_made_easy.core.training.data_template import GROUP_WEIGHTS
 
 _env = Environment(trim_blocks=True, lstrip_blocks=True, keep_trailing_newline=True)
 _env.filters["repr"] = repr
@@ -293,8 +294,9 @@ def _imports(spec: ClassicSpec) -> list[str]:
         else:
             need("sklearn.model_selection",
                  "GridSearchCV" if method == "grid" else "RandomizedSearchCV")
-    if "prep.class_balance" in steps and not (est.balanced and steps["prep.class_balance"]
-                                              ["strategy"] == "class weights"):
+    if "prep.class_balance" in steps and steps["prep.class_balance"]["strategy"] != \
+            "group weights" and not (est.balanced and steps["prep.class_balance"]
+                                     ["strategy"] == "class weights"):
         need("sklearn.utils.class_weight", "compute_sample_weight")
     order = ["sklearn.experimental"]
     lines = []
@@ -370,6 +372,18 @@ def _metric_needs_proba(spec: ClassicSpec) -> bool:
     return any(k == "log_loss" for _, _, k in spec.metrics)
 
 
+def _group_column(spec: ClassicSpec, d: dict) -> str:
+    column = str(spec.steps["prep.class_balance"].get("group_column") or "").strip()
+    if not column:
+        raise CodegenError("group weights: set Class Balancing's group column (e.g. region)")
+    if d["block"] != "data.csv":
+        raise CodegenError("group weights read a column of the table: they work for designs "
+                           "trained on a CSV / Parquet table (data.csv)")
+    if column == d.get("target_column"):
+        raise CodegenError(f"group weights: {column!r} is the target; pick another column")
+    return column
+
+
 def classic_context(spec: ClassicSpec) -> dict:
     est = spec.estimator
     extra = {}
@@ -417,7 +431,8 @@ def classic_context(spec: ClassicSpec) -> dict:
                        if spec.vectorizer else None),
         "grid": grid, "scoring": scoring,
         "task": spec.task, "supervised": spec.task in (ml.CLASSIFICATION, ml.REGRESSION),
-        "balance": balance, "sample_weight": balance and not (balance == "class weights"
+        "balance": balance, "group_column": _group_column(spec, d) if balance == "group weights"
+        else "", "group_weights_code": GROUP_WEIGHTS, "sample_weight": balance and not (balance == "class weights"
                                                               and est.balanced),
         "table": d["block"] == "data.csv", "text": spec.modality == "text",
         "clean": tok_clean,

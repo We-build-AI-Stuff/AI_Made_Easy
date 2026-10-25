@@ -109,6 +109,10 @@ def load_data():
     if target not in frame.columns:
         raise SystemExit(f"target column {target!r} not found; columns: {list(frame.columns)}")
     y = frame.pop(target)
+{% if balance == "group weights" %}
+    global GROUPS
+    GROUPS = pd.Series(group_column(frame, {{ group_column | repr }}), index=frame.index)
+{% endif %}
 {% else %}
     # labels are optional: they only score the result and are never trained on
     y = frame.pop(target) if target and target in frame.columns else None
@@ -371,6 +375,14 @@ def feature_importances(model: Pipeline, top: int = 15) -> list[tuple[str, float
 {% endif %}
 
 
+{% if balance == "group weights" %}
+GROUPS = None   # the group column of each row (Class Balancing's group weights)
+
+
+{{ group_weights_code }}
+
+
+{% endif %}
 {% if supervised %}
 def training_split(X, y):
     """Train / test rows, and the fit parameters that balance the classes."""
@@ -386,6 +398,8 @@ def training_split(X, y):
     X_train = X_train.iloc[picks] if hasattr(X_train, "iloc") else (
         [X_train[i] for i in picks] if isinstance(X_train, list) else X_train[picks])
     y_train = y_train[picks]
+{% elif balance == "group weights" %}
+    fit_params["model__sample_weight"] = group_weights(GROUPS.loc[X_train.index], y_train)
 {% elif sample_weight %}
     fit_params["model__sample_weight"] = compute_sample_weight("balanced", y_train)
 {% endif %}

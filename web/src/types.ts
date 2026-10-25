@@ -586,6 +586,27 @@ export interface GroupResult {
   groups?: GroupRow[];
   flagged?: string[];
   fairness?: Fairness | null;
+  mitigation?: Mitigation | null;
+}
+
+/** 3.11: a threshold per group for a binary classifier, with the groups' rates before
+ * and after on rows the thresholds were not fitted on. */
+export interface Mitigation {
+  fitted_on: string;
+  target_tpr: number | null;
+  thresholds: Record<string, number>;
+  before: MitigationSide;
+  after: MitigationSide;
+  fairness_before: Fairness | null;
+  fairness_after: Fairness | null;
+  helps?: boolean;
+  summary?: string;
+}
+
+export interface MitigationSide {
+  overall: { count: number; accuracy: number };
+  groups: { value: string; count: number; accuracy: number;
+            rates: { selection: (number | null)[]; tpr: (number | null)[]; fpr: (number | null)[] } }[];
 }
 
 /** 3.10: gaps in predicted-class and error rates between groups (classifiers). */

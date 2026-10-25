@@ -16,7 +16,7 @@ from ai_made_easy.core.codegen import (
 from ai_made_easy.core.graph import Graph
 from ai_made_easy.core.training import catalog as cat
 from ai_made_easy.core.training import data_catalog as dcat
-from ai_made_easy.core.training.data_template import DATA_TEMPLATE
+from ai_made_easy.core.training.data_template import DATA_TEMPLATE, GROUP_WEIGHTS
 from ai_made_easy.core.training.inference_template import (
     INFERENCE_COMMON,
     INFERENCE_KERAS,
@@ -165,6 +165,25 @@ def _data_ctx(spec: TrainingSpec, graph: Graph, framework: str) -> dict:
     return ctx
 
 
+def _group_column(spec: TrainingSpec) -> str:
+    """Group weights: a table's column, for a classifier trained on one split."""
+    column = str((spec.steps.get("prep.class_balance") or {}).get("group_column") or "").strip()
+    if not column:
+        raise CodegenError("group weights: set Class Balancing's group column (e.g. region)")
+    if spec.dataset["block"] != "data.csv":
+        raise CodegenError("group weights read a column of the table: they work for designs "
+                           "trained on a CSV / Parquet table (data.csv)")
+    if spec.task not in ("binary", "multiclass"):
+        raise CodegenError("group weights balance classes between groups: they need a "
+                           "binary or multiclass classifier")
+    if column == spec.dataset.get("target_column"):
+        raise CodegenError(f"group weights: {column!r} is the target; pick another column")
+    if spec.kfold:
+        raise CodegenError("group weights train on one split: remove K-Fold, or use "
+                           "another Class Balancing strategy")
+    return column
+
+
 def _common_ctx(graph: Graph, spec: TrainingSpec, framework: str) -> dict:
     plan = emit_graph(graph)
     require_framework(plan, framework)
@@ -176,6 +195,7 @@ def _common_ctx(graph: Graph, spec: TrainingSpec, framework: str) -> dict:
             "train.loss_cross_entropy", "train.loss_focal", "train.loss_bce_logits"):
         raise CodegenError("class weights need Cross-Entropy, Focal or BCE (logits) loss; "
                            "use the 'oversample' strategy instead")
+    group_column = _group_column(spec) if balance == "group weights" else ""
     torchvision = (framework == "pytorch" and spec.modality == "image")
     ctx = {
         **model_ctx,
@@ -188,6 +208,8 @@ def _common_ctx(graph: Graph, spec: TrainingSpec, framework: str) -> dict:
         "loss_input": meta["input"],
         "loss_helper": meta.get("helper"),
         "balance": balance,
+        "group_column": group_column,
+        "group_weights_code": GROUP_WEIGHTS,
         "metrics_code": metrics_code(spec.task, metrics),
         "torchvision_pipeline": torchvision,
         "image_inputs": spec.modality == "image",

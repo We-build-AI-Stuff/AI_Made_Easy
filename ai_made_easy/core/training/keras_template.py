@@ -284,7 +284,8 @@ def main() -> None:
             train_model.fit(x_train, fit_y, validation_data=(x_val, val_y) if len(x_val) else None,
                             epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=callbacks, verbose=0,
                             initial_epoch=first_epoch{% if balance == "class weights" %},
-                            class_weight=class_weight{% endif %})
+                            class_weight=class_weight{% elif balance == "group weights" %},
+                            sample_weight=group_weights(TRAIN_GROUPS, y_train){% endif %})
             break
         except Exception as exc:  # noqa: BLE001 — a model jit_compile can't take trains without
             if not train_model.jit_compile or finished:

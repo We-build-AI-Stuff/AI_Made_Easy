@@ -316,3 +316,174 @@ def test_quantization_aware_training_skips_what_it_cant_quantize():
     source = generate_training(Graph.from_dict(design), "pytorch")
     assert "QAT_EPOCHS = 0" in source
     assert "quantization-aware training is for models with one input and output" in source
+
+
+# ------------------------------------------------------------ Phase 2: fairness mitigation
+def _weights_code() -> dict:
+    import numpy as np
+
+    from ai_made_easy.core.training.data_template import GROUP_WEIGHTS
+
+    ns = {"np": np}
+    exec(GROUP_WEIGHTS, ns)  # noqa: S102 — the generated helper itself
+    return ns
+
+
+def test_group_weights_make_the_group_say_nothing_about_the_class():
+    import numpy as np
+
+    weights = _weights_code()["group_weights"]
+    groups = np.array(["n"] * 80 + ["s"] * 20)
+    labels = np.array([1] * 60 + [0] * 20 + [1] * 2 + [0] * 18)   # n: 75% positive, s: 10%
+    w = weights(groups, labels)
+    overall = (w * labels).sum() / w.sum()
+    for g in ("n", "s"):
+        mine = groups == g
+        assert (w[mine] * labels[mine]).sum() / w[mine].sum() == pytest.approx(overall)
+        assert w[mine].sum() == pytest.approx(mine.sum())        # each group keeps its size
+
+
+def _shifted_table(path: Path, n: int = 1200) -> Path:
+    """east's features are measured low, so a model trained without the region
+    under-scores it: its positives are missed far more often."""
+    import random
+
+    rng = random.Random(0)
+    rows = ["a,b,region,label"]
+    for i in range(n):
+        a, b = rng.random(), rng.random()
+        region = ("north", "south", "east")[i % 3]
+        label = int(a + b > 1)
+        if region == "east":
+            a, b = a * 0.6, b * 0.6
+        rows.append(f"{a:.3f},{b:.3f},{region},{label}")
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return path
+
+
+def _weighted(design: dict, **params) -> dict:
+    design["nodes"].append({"id": "cb", "type": "prep.class_balance", "position": [0, 0],
+                            "params": {"strategy": "group weights", **params}})
+    return design
+
+
+def test_group_weights_need_a_column_a_table_and_one_split(tmp_path):
+    from test_v38_features import _network
+
+    from ai_made_easy.core.codegen import CodegenError
+    from ai_made_easy.core.training.generate import generate_training
+
+    network = _network(_shifted_table(tmp_path / "t.csv", 30)).to_dict()
+    with pytest.raises(CodegenError, match="set Class Balancing's group column"):
+        generate_training(Graph.from_dict(_weighted(json.loads(json.dumps(network)))),
+                          "pytorch")
+    with pytest.raises(CodegenError, match="is the target"):
+        generate_training(Graph.from_dict(_weighted(json.loads(json.dumps(network)),
+                                                    group_column="label")), "pytorch")
+    folds = _weighted(json.loads(json.dumps(network)), group_column="region")
+    folds["nodes"].append({"id": "kf", "type": "train.kfold", "params": {"k": 3},
+                           "position": [0, 0]})
+    with pytest.raises(CodegenError, match="remove K-Fold"):
+        generate_training(Graph.from_dict(folds), "pytorch")
+    with pytest.raises(CodegenError, match="CSV / Parquet table"):
+        generate_training(Graph.from_dict(_weighted(_design(), group_column="region")),
+                          "pytorch")
+
+
+_SAMPLED = ("import numpy as np\n"
+            "real = m.group_weights\n"
+            "def spy(groups, labels):\n"
+            "    w = real(groups, labels)\n"
+            "    np.save('weights.npy', w); np.save('groups.npy', np.asarray(groups).astype(str))\n"
+            "    return w\n"
+            "m.group_weights = spy")
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("framework", ["pytorch", "keras", "sklearn"])
+def test_group_weights_train_in_every_framework(tmp_path, framework):
+    """The training rows are weighted by their group and class: the weighted rows of
+    each region are positive as often as all of them."""
+    import numpy as np
+
+    if framework == "keras":
+        keras = pytest.importorskip("keras")
+        if keras.backend.backend() != "torch":
+            pytest.skip("checked on the torch backend")
+    else:
+        pytest.importorskip("torch" if framework == "pytorch" else "sklearn")
+    from test_v38_features import _network
+
+    from ai_made_easy.core import recipes
+
+    table = _shifted_table(tmp_path / "t.csv", 300)
+    if framework == "sklearn":
+        facts = recipes.detect(table)
+        design = recipes.build("random_forest", facts.task, facts, {"n_estimators": 50}).to_dict()
+    else:
+        design = _network(table).to_dict()
+    script = _script(_weighted(design, group_column="region"), tmp_path / "run", framework)
+    _ok(_run(tmp_path / "run", script, _SAMPLED))
+    w, groups = np.load(tmp_path / "run" / "weights.npy"), np.load(tmp_path / "run" / "groups.npy")
+    assert len(w) == len(groups) and set(groups) == {"north", "south", "east"}
+    assert not np.allclose(w, 1.0)
+
+
+@pytest.mark.slow
+def test_a_threshold_per_group_evens_out_a_shifted_group(isolated_home, tmp_path):
+    """east is under-scored: its own, lower threshold (fitted on the validation rows)
+    finds its positives again, judged on the test rows."""
+    pytest.importorskip("torch")
+    from test_v38_features import _network
+
+    from ai_made_easy.core import api
+    from ai_made_easy.core.runner.manager import RunManager
+    from ai_made_easy.core.runs.history import RunHistory
+
+    mgr = RunManager(RunHistory(tmp_path / "runs"))
+    api.set_manager(mgr)
+    try:
+        run_id = api.start_training(_network(_shifted_table(tmp_path / "t.csv")))["run_id"]
+        assert mgr.wait(run_id, 600)["state"] == "finished"
+        scoring = api.results_by_group(run_id, "region")["run_id"]
+        assert mgr.wait(scoring, 600)["state"] == "finished"
+        out = api.group_result(scoring)
+        found = out["mitigation"]
+        assert "east" in out["fairness"]["flagged"]
+        assert found["fitted_on"] == "validation rows" and found["helps"]
+        assert found["thresholds"]["east"] < min(found["thresholds"]["north"],
+                                                 found["thresholds"]["south"])
+        assert found["fairness_after"]["odds_gap"] < found["fairness_before"]["odds_gap"] / 2
+        assert found["after"]["overall"]["accuracy"] > found["before"]["overall"]["accuracy"]
+        saved = json.loads((mgr.history.path(scoring) / "group_thresholds.json")
+                           .read_text(encoding="utf-8"))
+        assert saved["column"] == "region" and saved["thresholds"] == found["thresholds"]
+    finally:
+        api.set_manager(None)
+
+
+@pytest.mark.slow
+def test_a_classic_classifier_says_when_thresholds_dont_help(isolated_home, tmp_path):
+    """The forest sees the region and learns east's shift: there is nothing to even out,
+    and the summary says so instead of claiming a gain."""
+    pytest.importorskip("sklearn")
+    from ai_made_easy.core import api, recipes
+    from ai_made_easy.core.runner.manager import RunManager
+    from ai_made_easy.core.runs.history import RunHistory
+
+    mgr = RunManager(RunHistory(tmp_path / "runs"))
+    api.set_manager(mgr)
+    try:
+        facts = recipes.detect(_shifted_table(tmp_path / "t.csv"))
+        run_id = mgr.start(recipes.build("random_forest", facts.task, facts,
+                                         {"n_estimators": 50}))
+        assert mgr.wait(run_id, 600)["state"] == "finished"
+        scoring = api.results_by_group(run_id, "region")["run_id"]
+        assert mgr.wait(scoring, 600)["state"] == "finished"
+        found = api.group_result(scoring)["mitigation"]
+        assert found["fitted_on"].startswith("half of the test rows")
+        assert found["before"]["overall"]["count"] == found["after"]["overall"]["count"]
+        if not found["helps"]:
+            assert found["summary"].startswith("A threshold per group doesn't help here")
+    finally:
+        api.set_manager(None)
