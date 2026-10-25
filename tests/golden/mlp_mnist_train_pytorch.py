@@ -251,7 +251,7 @@ class GeneratorState:
         return self.generator.get_state()
 
     def load_state_dict(self, state: torch.Tensor) -> None:
-        self.generator.set_state(state)
+        self.generator.set_state(state.cpu())
 
 
 def save_resume(epoch: int, objects: dict, best: tuple) -> None:
@@ -273,12 +273,12 @@ def load_resume(objects: dict, device) -> tuple[int, tuple]:  # noqa: ANN001
     state = torch.load(RESUME_FILE, map_location=device, weights_only=False)
     for name, obj in objects.items():
         obj.load_state_dict(state[name])
-    torch.set_rng_state(state["rng"]["torch"])
+    torch.set_rng_state(state["rng"]["torch"].cpu())
     np.random.set_state(state["rng"]["numpy"])
     if state["rng"]["cuda"] is not None and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["rng"]["cuda"])
+        torch.cuda.set_rng_state_all([s.cpu() for s in state["rng"]["cuda"]])
     if state["rng"].get("mps") is not None and torch.backends.mps.is_available():
-        torch.mps.set_rng_state(state["rng"]["mps"])
+        torch.mps.set_rng_state(state["rng"]["mps"].cpu())
     print(f"resuming after epoch {state['epoch']}", flush=True)
     return state["epoch"], state["best"]
 
