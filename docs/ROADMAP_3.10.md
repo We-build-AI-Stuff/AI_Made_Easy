@@ -1,6 +1,6 @@
 # AI Made Easy 3.10 — plan and status
 
-*Status: built in PRs #75–#79; released as 3.10.0 after your confirmation.*
+*Status: implemented in PRs #75–#79; the 3.10.0 tag and release wait for your confirmation.*
 
 ## Phase 0 — resume Keras runs and remote runs (#75)
 - **Keras runs resume.** After each epoch the script saves the weights and optimizer, the
