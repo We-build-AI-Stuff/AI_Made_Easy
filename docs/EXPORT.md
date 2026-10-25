@@ -5,7 +5,7 @@ against the trained model** before it lands in the serving package:
 
 | Framework | Formats |
 | --- | --- |
-| PyTorch | ONNX, ONNX int8, TorchScript, Core ML, OpenVINO, ExecuTorch (`.pte`), ExecuTorch int8 |
+| PyTorch | ONNX, ONNX int8, TorchScript, Core ML, OpenVINO, ExecuTorch (`.pte`), ExecuTorch int8, GGUF (Llama-style language models) |
 | Keras | ONNX, TensorFlow SavedModel, LiteRT (`.tflite`), LiteRT int8 |
 | scikit-learn | ONNX |
 
@@ -79,6 +79,39 @@ pip install tensorflow                  # Keras -> LiteRT
   kernels drift slightly). Models with one input tensor; OpenVINO also reads the ONNX
   export.
 
+## GGUF: language models for llama.cpp, Ollama and LM Studio
+
+```bash
+pip install 'ai-made-easy[gguf]'      # plus llama-cpp-python to check the file
+aime deploy RUN_ID -o pkg --formats gguf
+```
+
+A language model built like the **Tiny Llama** recipe exports to one `model.gguf`
+(float32) that llama.cpp, Ollama and LM Studio run. That means Embedding → Llama
+Decoder Blocks → RMSNorm → Dense without bias. Its layers are llama.cpp's `llama`
+architecture one to one:
+- The rotary positions already rotate neighbouring feature pairs, as llama.cpp does.
+- The fused key/value and gate/up weights are split into llama.cpp's tensors.
+
+The tokenizer goes in the file too:
+- **Bytes:** one token per byte.
+- **BPE:** with a **BPE Tokenizer** block, the run's merges, as a GPT-2-style byte-level BPE.
+
+On the synthetic text (and on a sentence with contractions, accents and runs of
+spaces), llama.cpp splits text into exactly the run's tokens. Its word split follows
+GPT-2's and can differ on rare characters (combining accents).
+
+When llama-cpp-python is installed, the file is loaded on the CPU with a float32 cache
+and checked token by token against PyTorch. The tests ask for a gap under 1e-4; they
+see about 1e-6. llama.cpp's default float16 cache alone moves the logits by about 5e-4.
+
+Any other design lists GGUF as unavailable, with the reason. To make the file smaller,
+quantize it with llama.cpp:
+
+```bash
+llama-quantize model.gguf model-q8_0.gguf Q8_0
+```
+
 ## Detectors and graph networks
 
 **Detectors** (torchvision Faster / Mask / Keypoint R-CNN, RetinaNet, FCOS, SSD, the
@@ -135,6 +168,7 @@ rules:
 | FT-Transformer | ExecuTorch int8 | categorical ids read from the float row |
 | Mask2Former | ExecuTorch int8 | integer index tensors |
 | Stable Diffusion LoRA | all | adapters are served with diffusers |
+| Anything but a Llama-style decoder | GGUF | llama.cpp's `llama` architecture: Embedding → Llama Decoder Blocks → RMSNorm → Dense without bias |
 
 Known sensitivity: RT-DETR picks its queries from the top encoder scores. On untrained
 or barely trained models, near-ties can pick different queries in ONNX Runtime than in

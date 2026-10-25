@@ -487,3 +487,120 @@ def test_a_classic_classifier_says_when_thresholds_dont_help(isolated_home, tmp_
             assert found["summary"].startswith("A threshold per group doesn't help here")
     finally:
         api.set_manager(None)
+
+
+# ------------------------------------------------------------ Phase 2: GGUF
+def _llama_model(vocab: int = 256):
+    import types
+
+    import torch
+
+    from ai_made_easy.core import api
+    from ai_made_easy.core.codegen import generate
+
+    design = api.read_sample("tiny_llama.json")
+    for node in design["nodes"]:
+        if node["id"] == "embed":
+            node["params"]["num_embeddings"] = vocab
+        if node["id"] == "lm_head":
+            node["params"]["units"] = vocab
+    if vocab > 256:
+        design["nodes"].append({"id": "tok", "type": "gen.bpe_tokenizer", "position": [0, 0],
+                                "params": {"vocab_size": vocab}})
+    module = types.ModuleType("llama_model")
+    exec(generate(Graph.from_dict(design), "pytorch"), module.__dict__)  # noqa: S102
+    torch.manual_seed(0)
+    model = module.build_model().eval()
+    with torch.no_grad():
+        for p in model.parameters():          # away from the initial ones (norms of 1)
+            p.add_(torch.randn_like(p) * 0.05)
+    return model
+
+
+def test_gguf_takes_llama_style_decoders_only():
+    pytest.importorskip("torch")
+    import torch
+
+    from ai_made_easy.core.deploy import exporters
+
+    layout = exporters.llama_layout(_llama_model())
+    assert (layout["vocab"], layout["dim"], len(layout["blocks"]), layout["heads"],
+            layout["kv_heads"], layout["head_dim"]) == (256, 128, 2, 4, 2, 32)
+    with pytest.raises(exporters.Skipped, match="GGUF holds Llama-style decoders"):
+        exporters.llama_layout(torch.nn.Sequential(torch.nn.Linear(4, 2)))
+    tokens, rules = exporters.gguf_vocabulary(258, [(116, 104), (256, 101)])   # "th", "the"
+    assert len(tokens) == 258 and tokens[32] == "Ġ" and tokens[257] == "the"
+    assert rules == ["t h", "th e"]
+    with pytest.raises(exporters.Skipped, match="has 300 tokens but its tokenizer 258"):
+        exporters.gguf_vocabulary(300, [(116, 104), (256, 101)])
+
+
+def _text_tools() -> dict:
+    import heapq
+    import re
+    from collections import Counter, defaultdict
+
+    import numpy as np
+
+    from ai_made_easy.core.generative import runtime
+
+    ns = {"np": np, "re": re, "heapq": heapq, "Counter": Counter, "defaultdict": defaultdict}
+    exec(runtime.DATA_CODE, ns)  # noqa: S102 — the run's own text helpers
+    exec(runtime.TOKENIZER_CODE, ns)  # noqa: S102
+    return ns
+
+
+@pytest.mark.parametrize("bpe", [False, True], ids=["bytes", "bpe"])
+def test_gguf_matches_pytorch_and_the_runs_tokens(tmp_path, bpe):
+    """llama.cpp's logits are PyTorch's, token by token, and it splits text into the
+    same tokens as the run (bytes, or the run's BPE merges)."""
+    pytest.importorskip("torch")
+    pytest.importorskip("gguf")
+    llama_cpp = pytest.importorskip("llama_cpp")
+    from ai_made_easy.core.deploy import exporters
+
+    tools = _text_tools()
+    text = tools["synthetic_text"](400, 0)
+    merges = tools["train_bpe"](text, 300) if bpe else None
+    vocab = 256 + len(merges or [])
+    samples = exporters.random_samples("tensor", (64,), integer=True, vocab=vocab)
+    report = exporters.export_all(_llama_model(vocab), "pytorch", ["gguf"], tmp_path, samples,
+                                  merges=merges)["gguf"]
+    assert report["ok"], report
+    assert report["note"].startswith("matches PyTorch") and report["metrics"]["max_diff"] < 1e-4
+    assert ("BPE merges" in report["note"]) == bpe
+    llm = llama_cpp.Llama(model_path=str(tmp_path / "model.gguf"), vocab_only=True,
+                          verbose=False)
+    for sample in (text[:2000], "The robot's map isn't here: 1234 apples, naïve café!\n\n"
+                                "  spaced   out \x00\x00 end"):
+        expected = tools["BPE"](merges).encode(sample) if bpe else tools["encode_bytes"](sample)
+        assert llm.tokenize(sample.encode(), add_bos=False, special=False) == list(expected)
+        assert llm.detokenize(list(expected)).decode() == sample
+
+
+@pytest.mark.slow
+def test_a_trained_llama_exports_to_gguf_from_its_package(tmp_path):
+    pytest.importorskip("torch")
+    pytest.importorskip("gguf")
+    from test_modern_blocks import _llama_design
+
+    from ai_made_easy.core.deploy.package import build_package
+    from ai_made_easy.core.runner.manager import RunManager
+    from ai_made_easy.core.runs.history import RunHistory
+
+    design = _llama_design()
+    for node in design["nodes"]:
+        if node["type"] == "core.embedding":
+            node["params"]["num_embeddings"] = 300
+        if node["type"] == "core.dense":
+            node["params"].update(units=300, bias=False)
+    design["nodes"].append({"id": "tok", "type": "gen.bpe_tokenizer", "position": [0, 0],
+                            "params": {"vocab_size": 300}})
+    mgr = RunManager(RunHistory(tmp_path / "runs"))
+    run_id = mgr.start(Graph.from_dict(design))
+    assert mgr.wait(run_id, 600)["state"] == "finished", mgr.history.get(run_id).error[-2000:]
+    result = build_package(mgr.history.path(run_id), tmp_path / "pkg", formats=("gguf",))
+    entry = result.formats["gguf"]
+    assert entry["ok"], entry
+    assert "BPE merges" in entry["note"] and entry["note"].startswith("matches PyTorch")
+    assert (tmp_path / "pkg" / entry["file"]).is_file()
