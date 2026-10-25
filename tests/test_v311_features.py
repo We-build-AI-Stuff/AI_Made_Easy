@@ -164,7 +164,8 @@ def test_a_failing_process_stops_the_run(tmp_path, breaks):
     started = time.time()
     done = _run(tmp_path, _script(_design(gpus=2, epochs=50), tmp_path), breaks)
     assert done.returncode != 0
-    assert time.time() - started < 120
+    took = time.time() - started
+    assert took < 120, (f"{took:.0f}s", done.stdout[-1500:], done.stderr[-1500:])
     if breaks is _WORKER_BREAKS:
         assert "a training process stopped (exit code 3): stopping the run" in done.stdout
     else:

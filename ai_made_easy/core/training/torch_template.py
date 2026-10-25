@@ -476,11 +476,15 @@ def train_together(gpus: int) -> None:
                                 join=False, start_method=START_METHOD)
     done = threading.Event()
     threading.Thread(target=_watch, args=(others.processes, done), daemon=True).start()
-    try:
-        _train_as(0, count, port)
-    except BaseException:
+
+    def stop_others() -> None:   # they would wait for this one until the backend times out
         done.set()
-        _stop(others.processes)   # they would wait for this one until the backend times out
+        _stop(others.processes)
+
+    try:
+        _train_as(0, count, port, stop_others)
+    except BaseException:
+        stop_others()
         raise
     done.set()
     while not others.join():
@@ -519,7 +523,7 @@ def _one_of_many(index: int, world: int, port: int, settings: dict) -> None:
     _train_as(index + 1, world, port)
 
 
-def _train_as(rank: int, world: int, port: int) -> None:
+def _train_as(rank: int, world: int, port: int, on_failure=None) -> None:  # noqa: ANN001
     import torch.distributed as dist
 
     global RANK, WORLD
@@ -532,8 +536,11 @@ def _train_as(rank: int, world: int, port: int) -> None:
                             world_size=world)
     try:
         main()
-    finally:
-        dist.destroy_process_group()
+    except BaseException:
+        if on_failure is not None:
+            on_failure()   # first, before anything can wait on the other processes
+        raise              # no teardown: it can wait on processes that are gone
+    dist.destroy_process_group()
 
 
 def shard(model: nn.Module, device: torch.device) -> None:
