@@ -1,7 +1,6 @@
 # AI Made Easy 3.9 — plan and status
 
-*Status: built in PRs #70–#74, ready for your review. Nothing is merged or tagged until
-you say so.*
+*Status: released as 3.9.0 (PRs #70–#74).*
 
 ## Phase 0 — fixes from 3.8 and coverage (#70)
 - **The MCP server on Windows.** 3.8's CI captured the stall: the first tool call loaded
@@ -71,5 +70,5 @@ you say so.*
 
 ## Still open
 - Making the Windows test jobs required checks is your call (a ruleset change).
-- Resume covers PyTorch runs on this computer; runs on remote backends and Keras runs
-  restart from the beginning.
+- Resume for runs on remote backends and Keras runs: done in 3.10
+  ([ROADMAP_3.10.md](ROADMAP_3.10.md)).
