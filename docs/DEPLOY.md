@@ -34,33 +34,33 @@ deploy it: unavailable formats are greyed out with the reason.
 
 | Task | Example recipe | Trained with | `/predict` takes | Export formats |
 | --- | --- | --- | --- | --- |
-| Multi-class classification | MLP | PyTorch | arrays | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
-| Binary classification | MLP | PyTorch | arrays | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
-| Regression | MLP | PyTorch | arrays | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
-| Multi-label classification | MLP | PyTorch | arrays | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
-| Distribution matching | MLP | PyTorch | arrays | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Multi-class classification | MLP | PyTorch | arrays | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Binary classification | MLP | PyTorch | arrays | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Regression | MLP | PyTorch | arrays | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Multi-label classification | MLP | PyTorch | arrays | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Distribution matching | MLP | PyTorch | arrays | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
 | Clustering | k-Means | scikit-learn | records | ONNX |
 | Anomaly detection | Isolation Forest | scikit-learn | records | ONNX |
-| Keyword spotting | Pretrained speech encoder — linear probe | PyTorch | speech | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Keyword spotting | Pretrained speech encoder — linear probe | PyTorch | speech | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
 | Object detection | Faster R-CNN (MobileNetV3) | PyTorch | images | ONNX, ONNX (int8 quantized), TorchScript |
 | Instance segmentation | Mask R-CNN | PyTorch | images | ONNX, ONNX (int8 quantized), TorchScript |
 | Keypoint detection | Keypoint R-CNN | PyTorch | images | ONNX, ONNX (int8 quantized), TorchScript |
-| Semantic segmentation | U-Net | PyTorch | images | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
-| Time-series forecasting | Forecasting network | PyTorch | series | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
-| Audio tagging | Audio tagger | PyTorch | speech | ONNX, ONNX (int8 quantized), TorchScript, Core ML |
-| Speech recognition (CTC) | BiLSTM + CTC | PyTorch | speech | ONNX, ONNX (int8 quantized), TorchScript, Core ML |
-| Variational autoencoder | Variational autoencoder | PyTorch | generation | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
-| Image generation (GAN) | DCGAN | PyTorch | generation | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
-| Image generation (diffusion) | Diffusion (DDPM) | PyTorch | generation | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Semantic segmentation | U-Net | PyTorch | images | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Time-series forecasting | Forecasting network | PyTorch | series | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Audio tagging | Audio tagger | PyTorch | speech | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin) |
+| Speech recognition (CTC) | BiLSTM + CTC | PyTorch | speech | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin) |
+| Variational autoencoder | Variational autoencoder | PyTorch | generation | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Image generation (GAN) | DCGAN | PyTorch | generation | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Image generation (diffusion) | Diffusion (DDPM) | PyTorch | generation | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
 | Text-to-image fine-tuning (LoRA) | Stable Diffusion LoRA | PyTorch | text_to_image | — |
-| Language modeling | Tiny GPT | PyTorch | prompt | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
-| Sequence to sequence | Encoder-decoder transformer | PyTorch | prompt | ONNX, ONNX (int8 quantized), TorchScript, Core ML |
-| Density estimation (normalizing flow) | RealNVP flow | PyTorch | density | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Language modeling | Tiny GPT | PyTorch | prompt | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Sequence to sequence | Encoder-decoder transformer | PyTorch | prompt | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin) |
+| Density estimation (normalizing flow) | RealNVP flow | PyTorch | density | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
 | Node classification | GCN | PyTorch | graph | ONNX, ONNX (int8 quantized), TorchScript |
 | Graph classification | GIN | PyTorch | graph | ONNX, ONNX (int8 quantized), TorchScript |
 | Link prediction | GraphSAGE link predictor | PyTorch | graph | ONNX, ONNX (int8 quantized), TorchScript |
-| Recommendation | Matrix factorization | PyTorch | ranking | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
-| Reinforcement learning | PPO | PyTorch | observations | ONNX, ONNX (int8 quantized), TorchScript, Core ML, ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Recommendation | Matrix factorization | PyTorch | ranking | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Reinforcement learning | PPO | PyTorch | observations | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
 | Probabilistic inference | Bayesian network | pgmpy | evidence | — |
 | Regime detection (HMM) | Hidden Markov model | pgmpy | sequences | — |
 | Bayesian modeling | Hierarchical regression | PyMC | records | — |
