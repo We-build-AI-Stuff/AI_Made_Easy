@@ -195,7 +195,9 @@ def _fit_training_memory(g: "Graph"):
         trainer.params["mixed_precision"] = True
         return ("Use mixed precision", "turn on mixed precision: activations take half the "
                 "memory and the batch size stays the same", g)
-    if est.gpus > 1 and not est.sharded:
+    p = trainer.resolved_params()
+    averaging = float(p.get("ema_decay") or 0) or int(p.get("swa_start") or 0)
+    if est.gpus > 1 and not est.sharded and not averaging:   # sharding keeps no averages
         est.sharded = True
         if est.train_memory_bytes() <= limit:
             trainer.params["sharding"] = True

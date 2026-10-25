@@ -54,7 +54,7 @@ def quantization_aware(model: nn.Module, loss_fn, train_loader: DataLoader,
         return {}
     cpu = torch.device("cpu")
     model = copy.deepcopy(model).to(cpu).eval()
-    loss_fn = loss_fn.to(cpu) if hasattr(loss_fn, "to") else loss_fn
+    loss_fn = copy.deepcopy(loss_fn).to(cpu) if hasattr(loss_fn, "to") else loss_fn  # the run's stays
     example = next(iter(train_loader))[0][:2].to(cpu)
     batch = torch.export.Dim("batch", min=1)
     try:
@@ -164,7 +164,11 @@ def main() -> None:
 {% endif %}
     print("test: " + " ".join(f"{k}={v:.4f}" for k, v in report.items()))
     if QAT_EPOCHS:
-        test_metrics.update(quantization_aware(model, loss_fn, train_loader, test_loader))
+        try:
+            test_metrics.update(quantization_aware(model, loss_fn, train_loader, test_loader))
+        except Exception as exc:  # noqa: BLE001 — QAT is optional: keep the float results
+            print(f"quantization-aware training skipped: {type(exc).__name__}: "
+                  f"{str(exc)[:200]}", flush=True)
     final = {**report, **test_metrics, **{f"cv_{m}": v for m, v in cv.items()}}
     Path("metrics.json").write_text(json.dumps(
         {k: v for k, v in final.items() if isinstance(v, (float, list))}, indent=1), encoding="utf-8")

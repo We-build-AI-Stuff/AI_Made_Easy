@@ -100,11 +100,14 @@ def test_a_stopped_ssh_run_resumes_on_its_host(isolated_home, fake_ssh):  # noqa
         after = api.resume_info(run_id)["after_epoch"]
         assert after >= 2
         assert api.resume_run(run_id)["after_epoch"] == after
-        # a slow runner takes a while to send the bundle out again and start the script
-        _wait(lambda: mgr.history.get(run_id).epochs_done > after + 1, 300,
-              lambda: f"the resumed run ({list(mgr.get(run_id).logs)[-5:]})")
+        # a slow runner takes a while to send the bundle out again and start the script;
+        # the stopped run's own epochs count until the resumed script says where it starts
+        _wait(lambda: any("resuming after epoch" in line for line in mgr.get(run_id).logs),
+              300, lambda: f"the resumed run ({list(mgr.get(run_id).logs)[-5:]})")
         logs = mgr.get(run_id).logs
         assert any(f"resuming after epoch {after}" in line for line in logs), logs[-20:]
+        _wait(lambda: mgr.history.get(run_id).epochs_done > after + 1, 300,
+              lambda: f"the resumed run ({list(mgr.get(run_id).logs)[-5:]})")
         assert any("connected" in line for line in logs)
         mgr.stop(run_id)
         mgr.wait(run_id, 120)

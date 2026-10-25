@@ -164,7 +164,8 @@ def test_a_failing_process_stops_the_run(tmp_path, breaks):
     started = time.time()
     done = _run(tmp_path, _script(_design(gpus=2, epochs=50), tmp_path), breaks)
     assert done.returncode != 0
-    assert time.time() - started < 120
+    took = time.time() - started
+    assert took < 120, (f"{took:.0f}s", done.stdout[-1500:], done.stderr[-1500:])
     if breaks is _WORKER_BREAKS:
         assert "a training process stopped (exit code 3): stopping the run" in done.stdout
     else:
@@ -263,6 +264,8 @@ def test_sharding_checks_and_memory():
     model_part = lambda e: e.train_memory_bytes(batch_size=0) - (e.device.overhead_gb * budget.GB  # noqa: E731
                                                                if e.device else 0)
     assert model_part(sharded) < model_part(whole)
+    # each GPU holds the whole weights once, before they are split
+    assert model_part(sharded) >= sharded.params * 4
 
 
 def test_the_fix_for_memory_shards_a_model_on_several_gpus(monkeypatch):
@@ -280,6 +283,9 @@ def test_the_fix_for_memory_shards_a_model_on_several_gpus(monkeypatch):
     assert fixed and fixed[0] == "Shard the model"
     trainer = next(n for n in fixed[2].nodes.values() if n.type_id == "train.trainer")
     assert trainer.params["sharding"] is True
+    averaged = Graph.from_dict(_design(gpus=4, mixed_precision=True, ema_decay=0.99))
+    fixed = fixes._fit_training_memory(averaged)                 # sharding keeps no EMA
+    assert not fixed or fixed[0] != "Shard the model"
 
 
 @pytest.mark.slow
@@ -305,6 +311,26 @@ def test_quantization_aware_training_feeds_the_int8_export(tmp_path):
     entry = result.formats["executorch_int8"]
     assert entry["ok"], entry
     assert "quantization-aware trained" in entry["note"]
+
+
+_QAT_FAILS_LATE = ("import torch\n"
+                   "def broken(*args, **kwargs):\n"
+                   "    raise RuntimeError('disk full')\n"
+                   "torch.export.save = broken")
+
+
+@pytest.mark.slow
+def test_quantization_aware_training_failing_late_keeps_the_float_results(tmp_path):
+    """QAT is optional: a failure after fine-tuning (here saving the program) is reported
+    and the run still writes its metrics."""
+    pytest.importorskip("torch")
+    pytest.importorskip("executorch")
+    pytest.importorskip("torchao")
+    out = _ok(_run(tmp_path, _script(_design(qat_epochs=1), tmp_path), _QAT_FAILS_LATE))
+    assert "quantization-aware training skipped: RuntimeError: disk full" in out
+    metrics = json.loads((tmp_path / "metrics.json").read_text(encoding="utf-8"))
+    assert "accuracy" in metrics and "int8_accuracy" not in metrics
+    assert not (tmp_path / "qat_int8.pt2").exists()
 
 
 def test_quantization_aware_training_skips_what_it_cant_quantize():

@@ -223,7 +223,10 @@ class Estimate:
             saved = min(saved, self.checkpointed_activations())
         acts = saved * batch * (2 if amp else 4) * SAVED_ACTIVATION_FACTOR
         overhead = (self.device.overhead_gb if self.device else 0.0) * GB
-        return int(weights + grads + states + acts + overhead)
+        total = weights + grads + states + acts
+        if self.sharded and self.gpus > 1:   # each GPU holds the whole weights until they split
+            total = max(total, self.params * 4)
+        return int(total + overhead)
 
     def inference_memory_bytes(self) -> int:
         peak = max((layer.activations for layer in self.layers), default=0)

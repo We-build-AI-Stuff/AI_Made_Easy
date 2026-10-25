@@ -458,11 +458,15 @@ def train_together(gpus: int) -> None:
                                 join=False, start_method=START_METHOD)
     done = threading.Event()
     threading.Thread(target=_watch, args=(others.processes, done), daemon=True).start()
-    try:
-        _train_as(0, count, port)
-    except BaseException:
+
+    def stop_others() -> None:   # they would wait for this one until the backend times out
         done.set()
-        _stop(others.processes)   # they would wait for this one until the backend times out
+        _stop(others.processes)
+
+    try:
+        _train_as(0, count, port, stop_others)
+    except BaseException:
+        stop_others()
         raise
     done.set()
     while not others.join():
@@ -501,7 +505,7 @@ def _one_of_many(index: int, world: int, port: int, settings: dict) -> None:
     _train_as(index + 1, world, port)
 
 
-def _train_as(rank: int, world: int, port: int) -> None:
+def _train_as(rank: int, world: int, port: int, on_failure=None) -> None:  # noqa: ANN001
     import torch.distributed as dist
 
     global RANK, WORLD
@@ -514,15 +518,25 @@ def _train_as(rank: int, world: int, port: int) -> None:
                             world_size=world)
     try:
         main()
-    finally:
-        dist.destroy_process_group()
+    except BaseException:
+        if on_failure is not None:
+            on_failure()   # first, before anything can wait on the other processes
+        raise              # no teardown: it can wait on processes that are gone
+    dist.destroy_process_group()
 
 
 def shard(model: nn.Module, device: torch.device) -> None:
     """Split each layer's weights (and so its gradients and optimizer state) between the
     processes; a layer gathers its weights only while it computes (FSDP)."""
     from torch.distributed.device_mesh import init_device_mesh
-    from torch.distributed.fsdp import fully_shard
+    try:
+        from torch.distributed.fsdp import fully_shard
+    except ImportError:
+        try:
+            from torch.distributed._composable.fsdp import fully_shard   # PyTorch 2.4-2.5
+        except ImportError:
+            raise SystemExit("sharding (FSDP2) needs PyTorch 2.4 or newer; this is "
+                             f"{torch.__version__}") from None
 
     mesh = init_device_mesh(device.type, (WORLD,))
     for layer in model.children():
@@ -559,7 +573,9 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
         loss_fn = loss_fn.to(device)
     unsharded = None
     if WORLD > 1 and SHARDED:   # the first process keeps a whole copy to test and save
-        unsharded = copy.deepcopy(model).cpu() if RANK == 0 else None
+        if RANK == 0:   # copied on the CPU: never a second whole copy on the GPU
+            unsharded = copy.deepcopy(model.cpu())
+            model.to(device)
         shard(model, device)
     params = PARAM_GROUPS(model) if PARAM_GROUPS is not None else model.parameters()
     optimizer = torch.optim.RAdam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-08)
@@ -859,7 +875,7 @@ def quantization_aware(model: nn.Module, loss_fn, train_loader: DataLoader,
         return {}
     cpu = torch.device("cpu")
     model = copy.deepcopy(model).to(cpu).eval()
-    loss_fn = loss_fn.to(cpu) if hasattr(loss_fn, "to") else loss_fn
+    loss_fn = copy.deepcopy(loss_fn).to(cpu) if hasattr(loss_fn, "to") else loss_fn  # the run's stays
     example = next(iter(train_loader))[0][:2].to(cpu)
     batch = torch.export.Dim("batch", min=1)
     try:
@@ -948,7 +964,11 @@ def main() -> None:
     report = {"loss": test_loss, **{k: v for k, v in test_metrics.items() if isinstance(v, float)}}
     print("test: " + " ".join(f"{k}={v:.4f}" for k, v in report.items()))
     if QAT_EPOCHS:
-        test_metrics.update(quantization_aware(model, loss_fn, train_loader, test_loader))
+        try:
+            test_metrics.update(quantization_aware(model, loss_fn, train_loader, test_loader))
+        except Exception as exc:  # noqa: BLE001 — QAT is optional: keep the float results
+            print(f"quantization-aware training skipped: {type(exc).__name__}: "
+                  f"{str(exc)[:200]}", flush=True)
     final = {**report, **test_metrics, **{f"cv_{m}": v for m, v in cv.items()}}
     Path("metrics.json").write_text(json.dumps(
         {k: v for k, v in final.items() if isinstance(v, (float, list))}, indent=1), encoding="utf-8")
