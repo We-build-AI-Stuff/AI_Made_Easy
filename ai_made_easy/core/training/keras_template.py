@@ -125,6 +125,37 @@ class EpochReport(keras.callbacks.Callback):
               f"({time.time() - self.started:.1f}s)", flush=True)
 
 
+def random_state(model: keras.Model) -> dict:
+    """Every random generator training draws on: Python's, NumPy's, PyTorch's (unseeded
+    dropout uses the device's own) and the layers' (dropout, augmentation)."""
+    torch_state = None
+    if keras.backend.backend() == "torch":
+        import torch
+
+        torch_state = {
+            "cpu": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "mps": torch.mps.get_rng_state() if torch.backends.mps.is_available() else None}
+    return {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch_state,
+            "seeds": [keras.ops.convert_to_numpy(g.state) for g in SaveResume.seeds(model)]}
+
+
+def set_random_state(model: keras.Model, state: dict, layers: bool = True) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    if state["torch"] is not None:
+        import torch
+
+        torch.set_rng_state(state["torch"]["cpu"])
+        if state["torch"]["cuda"] is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(state["torch"]["cuda"])
+        if state["torch"]["mps"] is not None and torch.backends.mps.is_available():
+            torch.mps.set_rng_state(state["torch"]["mps"])
+    if layers:
+        for generator, value in zip(SaveResume.seeds(model), state["seeds"], strict=True):
+            generator.state.assign(value)
+
+
 class SaveResume(keras.callbacks.Callback):
     """After each epoch, what training needs to continue: the weights and optimizer
     (RESUME_FILE), the random state and the other callbacks' counters (early stopping,
@@ -164,31 +195,12 @@ class SaveResume(keras.callbacks.Callback):
             return
         for callback, kept in zip(self.callbacks, state["callbacks"], strict=True):
             callback.__dict__.update(kept)
-        random.setstate(state["python"])
-        np.random.set_state(state["numpy"])
-        if state["torch"] is not None:
-            import torch
-
-            torch.set_rng_state(state["torch"]["cpu"])
-            if state["torch"]["cuda"] is not None and torch.cuda.is_available():
-                torch.cuda.set_rng_state_all(state["torch"]["cuda"])
-            if state["torch"]["mps"] is not None and torch.backends.mps.is_available():
-                torch.mps.set_rng_state(state["torch"]["mps"])
+        set_random_state(self.model, state, layers=False)   # the layers' came back in load
 
     def on_epoch_end(self, epoch, logs=None) -> None:
         tmp = self.weights.with_name("resume.tmp.weights.h5")
         self.model.save_weights(tmp, overwrite=True)
-        torch_state = None
-        if keras.backend.backend() == "torch":
-            import torch
-
-            torch_state = {   # unseeded dropout draws on the device's own generator
-                "cpu": torch.get_rng_state(),
-                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-                "mps": torch.mps.get_rng_state() if torch.backends.mps.is_available() else None}
-        state = {"epoch": epoch + 1, "python": random.getstate(),
-                 "numpy": np.random.get_state(), "torch": torch_state,
-                 "seeds": [keras.ops.convert_to_numpy(g.state) for g in self.seeds(self.model)],
+        state = {"epoch": epoch + 1, **random_state(self.model),
                  "callbacks": [{k: v for k, v in vars(c).items() if k in self.KEPT}
                                for c in self.callbacks]}
         with open(self.extra.with_suffix(".tmp"), "wb") as fh:
@@ -275,7 +287,8 @@ def main() -> None:
         callbacks.append(saver)
     finished, started = [], None
     if COMPILE:   # the state to go back to if compiling fails
-        started = (train_model.get_weights(), [np.array(v) for v in optimizer.variables])
+        started = (train_model.get_weights(), [np.array(v) for v in optimizer.variables],
+                   random_state(train_model))
         callbacks.append(keras.callbacks.LambdaCallback(
             on_epoch_end=lambda e, logs: finished.append(e)))
         print("compiling with jit_compile", flush=True)
@@ -291,8 +304,9 @@ def main() -> None:
                 raise
             print(f"jit_compile did not work ({type(exc).__name__}: {str(exc)[:200]}): "
                   "training without", flush=True)
-            weights, slots = started
+            weights, slots, randomness = started
             train_model.set_weights(weights)
+            set_random_state(train_model, randomness)   # dropout draws as if never compiled
             if slots and len(slots) == len(optimizer.variables):   # resumed: its own state
                 for variable, value in zip(optimizer.variables, slots, strict=True):
                     variable.assign(value)
