@@ -732,6 +732,10 @@ def test_regressors_reach_a_value_and_bad_requests_say_why():
         search(_model(False), row, _columns(), locked=list(_columns()))
     with pytest.raises(CounterfactualError, match="pick a class to reach"):
         search(_model(False), row, _columns(), desired="maybe")
+    with pytest.raises(CounterfactualError, match="it already predicts no: pick another class"):
+        search(_model(False), row, _columns(), desired="no")
+    with pytest.raises(CounterfactualError, match="already reaches 30: pick another value"):
+        search(price, row, _columns(), target=30.0)          # its value now
 
 
 @pytest.mark.slow
@@ -771,6 +775,9 @@ def test_a_trained_network_says_what_would_change_its_prediction(isolated_home, 
                                             json={"row": row, "locked": ["b"]})
         assert got.status_code == 200
         assert {e["changes"][0]["column"] for e in got.json()["single"]} == {"a"}
+        bad = TestClient(create_app()).post(f"/api/runs/{run_id}/counterfactuals",
+                                            json={"row": row, "target": [1, 2]})
+        assert bad.status_code == 400 and "target must be a number" in bad.text
         _desktop_finds_changes(mgr, run_id)
     finally:
         api.try_service().close()

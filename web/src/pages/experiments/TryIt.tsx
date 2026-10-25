@@ -70,6 +70,7 @@ export function TryModal({ run, onClose }: { run: RunRecord; onClose: () => void
   const [json, setJson] = useState("");
   const [file, setFile] = useState<{ name: string; url: string } | null>(null);
   const [result, setResult] = useState<{ predictions: Prediction[]; latency_ms: number } | null>(null);
+  const [asked, setAsked] = useState<Record<string, unknown> | null>(null);   // the row predicted
   const [explain, setExplain] = useState(false);
   const [batch, setBatch] = useState<{ name: string; url: string; rows: number } | null>(null);
 
@@ -96,10 +97,13 @@ export function TryModal({ run, onClose }: { run: RunRecord; onClose: () => void
     setBusy(true);
     setError("");
     try {
-      setResult(await api.tryRun(run.run_id, inputs(), explain && !!form?.can_explain));
+      const sent = inputs();
+      setResult(await api.tryRun(run.run_id, sent, explain && !!form?.can_explain));
+      setAsked(columns.length ? (sent[0] as Record<string, unknown>) : null);
     } catch (e) {
       setError(String((e as Error).message));
       setResult(null);
+      setAsked(null);
     } finally {
       setBusy(false);
     }
@@ -174,8 +178,8 @@ export function TryModal({ run, onClose }: { run: RunRecord; onClose: () => void
           {result.predictions.map((p, i) => <TryResult key={i} prediction={p} />)}
           <p className="muted">{result.latency_ms} ms</p>
         </div>)}
-      {result && columns.length > 0 && (
-        <WhatWouldChange runId={run.run_id} row={inputs()[0] as Record<string, unknown>}
+      {result && asked && (   // keyed by the row: a new prediction starts a new search
+        <WhatWouldChange key={JSON.stringify(asked)} runId={run.run_id} row={asked}
                          columns={columns} prediction={result.predictions[0]} />)}
     </Modal>
   );

@@ -145,6 +145,10 @@ def search(predict, row: dict, columns: dict, *, desired: str | None = None,  # 
 
     base = ask([row])[0]
     goal = _Goal(base, desired, target)
+    if goal.reached(base):
+        raise CounterfactualError(
+            f"it already predicts {goal.desired}: pick another class" if goal.kind == "class"
+            else f"the prediction already reaches {goal.target:g}: pick another value")
     free = {c: info for c, info in columns.items() if c not in set(locked)}
     if not free:
         raise CounterfactualError("every column is locked: unlock one for the search to change")
