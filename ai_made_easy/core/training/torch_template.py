@@ -547,7 +547,14 @@ def shard(model: nn.Module, device: torch.device) -> None:
     """Split each layer's weights (and so its gradients and optimizer state) between the
     processes; a layer gathers its weights only while it computes (FSDP)."""
     from torch.distributed.device_mesh import init_device_mesh
-    from torch.distributed.fsdp import fully_shard
+    try:
+        from torch.distributed.fsdp import fully_shard
+    except ImportError:
+        try:
+            from torch.distributed._composable.fsdp import fully_shard   # PyTorch 2.4-2.5
+        except ImportError:
+            raise SystemExit("sharding (FSDP2) needs PyTorch 2.4 or newer; this is "
+                             f"{torch.__version__}") from None
 
     mesh = init_device_mesh(device.type, (WORLD,))
     for layer in model.children():
@@ -592,7 +599,9 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
 {% endif %}
     unsharded = None
     if WORLD > 1 and SHARDED:   # the first process keeps a whole copy to test and save
-        unsharded = copy.deepcopy(model).cpu() if RANK == 0 else None
+        if RANK == 0:   # copied on the CPU: never a second whole copy on the GPU
+            unsharded = copy.deepcopy(model.cpu())
+            model.to(device)
         shard(model, device)
     params = PARAM_GROUPS(model) if PARAM_GROUPS is not None else model.parameters()
     optimizer = {{ optimizer_expr | replace("model.parameters()", "params") }}
