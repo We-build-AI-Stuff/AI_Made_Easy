@@ -66,6 +66,9 @@ while True:
     time.sleep(0.5)
 '''
 
+# a previous attempt's progress files, removed before a run (re)starts in its folder
+STALE = ("events.jsonl", "exit_code", "pid")
+
 # outputs left out of the download: the bundle and the launcher's own files
 _SKIP = ("bundle.tar.gz", LAUNCHER_NAME, "pid", "launch.log", "exit_code")
 
@@ -185,8 +188,11 @@ class SSHBackend(RemoteBackend):
         else:
             inner = (f"{shlex.quote(self.python)} {LAUNCHER_NAME} . --bundle bundle.tar.gz "
                      f"{flags}")
-        # not "cd && nohup … &": that backgrounds a subshell that keeps ssh's output open
-        return f"cd {d} || exit 1; nohup {inner} > launch.log 2>&1 < /dev/null & echo started"
+        # a resumed run reuses the folder: its last attempt's events and exit code go first,
+        # or the follower (started right after) could replay them before the launcher runs.
+        # Not "cd && nohup … &": that backgrounds a subshell that keeps ssh's output open
+        return (f"cd {d} || exit 1; rm -f {' '.join(STALE)}; "
+                f"nohup {inner} > launch.log 2>&1 < /dev/null & echo started")
 
     def launch(self, run: TrainingRun, python: str) -> None:
         bundle = run.bundle

@@ -363,10 +363,21 @@ class Compiled:
         return self.model(x)
 
 
+def _recomputed(layer: nn.Module, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+    from torch.utils.checkpoint import checkpoint
+
+    forward = type(layer).forward.__get__(layer)
+    if layer.training and torch.is_grad_enabled():
+        return checkpoint(forward, *args, use_reentrant=False, **kwargs)
+    return forward(*args, **kwargs)
+
+
 def checkpoint_layers(model: nn.Module) -> int:
     """Recompute each layer's activations in the backward pass instead of keeping them.
-    Layers with batch norm keep theirs (recomputing would update its statistics twice)."""
-    from torch.utils.checkpoint import checkpoint
+    Layers with batch norm keep theirs (recomputing would update its statistics twice).
+    Each wrapper is a method bound to its layer, so a copy of the model (EMA, SWA,
+    quantization-aware training) runs its own layers."""
+    import types
 
     count = 0
     for layer in model.children():
@@ -374,13 +385,7 @@ def checkpoint_layers(model: nn.Module) -> int:
                 or not any(p.requires_grad for p in layer.parameters())
                 or any(isinstance(m, nn.modules.batchnorm._BatchNorm) for m in layer.modules())):
             continue
-
-        def recomputed(*args, _forward=layer.forward, _layer=layer, **kwargs):  # noqa: ANN002, ANN003, ANN202
-            if _layer.training and torch.is_grad_enabled():
-                return checkpoint(_forward, *args, use_reentrant=False, **kwargs)
-            return _forward(*args, **kwargs)
-
-        layer.forward = recomputed
+        layer.forward = types.MethodType(_recomputed, layer)
         count += 1
     return count
 

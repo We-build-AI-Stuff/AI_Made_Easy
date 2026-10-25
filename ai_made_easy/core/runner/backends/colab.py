@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 from ai_made_easy.core.runner.backends import BackendError, RemoteBackend
 from ai_made_easy.core.runner.backends.bundle import LAUNCHER_NAME
+from ai_made_easy.core.runner.backends.ssh import STALE
 from ai_made_easy.core.runs.history import FINAL_STATES
 
 if TYPE_CHECKING:
@@ -164,6 +165,8 @@ class ColabBackend(RemoteBackend):
             else:
                 folder = drive / APP_FOLDER / "runs" / run.run_id
                 folder.mkdir(parents=True, exist_ok=True)
+                for name in STALE:   # a resumed run's last attempt would end the follow
+                    (folder / name).unlink(missing_ok=True)
                 (folder / "bundle.tar.gz").write_bytes(run.bundle.tar_bytes())
                 (folder / LAUNCHER_NAME).write_text(run.bundle.launcher(), encoding="utf-8")
                 book = drive / APP_FOLDER / f"{run.run_id}.ipynb"
