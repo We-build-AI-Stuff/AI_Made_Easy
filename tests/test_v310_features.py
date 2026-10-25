@@ -76,9 +76,10 @@ def test_a_stopped_keras_run_resumes_as_the_same_run(isolated_home, tmp_path):
         api.set_manager(None)
 
 
-def _wait(condition, timeout: float = 120) -> None:
+def _wait(condition, timeout: float = 120, what=lambda: "the run") -> None:  # noqa: ANN001
     deadline = time.time() + timeout
-    while not condition() and time.time() < deadline:
+    while not condition():
+        assert time.time() < deadline, f"{what()}: still waiting after {timeout:.0f}s"
         time.sleep(0.2)
 
 
@@ -99,7 +100,9 @@ def test_a_stopped_ssh_run_resumes_on_its_host(isolated_home, fake_ssh):  # noqa
         after = api.resume_info(run_id)["after_epoch"]
         assert after >= 2
         assert api.resume_run(run_id)["after_epoch"] == after
-        _wait(lambda: mgr.history.get(run_id).epochs_done > after + 1)
+        # a slow runner takes a while to send the bundle out again and start the script
+        _wait(lambda: mgr.history.get(run_id).epochs_done > after + 1, 300,
+              lambda: f"the resumed run ({list(mgr.get(run_id).logs)[-5:]})")
         logs = mgr.get(run_id).logs
         assert any(f"resuming after epoch {after}" in line for line in logs), logs[-20:]
         assert any("connected" in line for line in logs)
