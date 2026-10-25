@@ -29,6 +29,10 @@ EARLY_STOP = 0
 GRAD_CLIP = 0.0
 ACCUM_STEPS = 1
 MIXED_PRECISION = False
+COMPILE = False   # torch.compile the training steps
+CHECKPOINTING = False   # recompute activations: less memory
+GPUS = 1   # GPUs of this machine that train together (DistributedDataParallel)
+RANK, WORLD = 0, 1      # this process's place among them (set for each GPU's process)
 VAL_FRACTION = 0.1
 TEST_FRACTION = 0.1
 SPLIT_SEED = 42
@@ -150,8 +154,14 @@ def dataset_targets(ds: TransformedSubset) -> np.ndarray:
 def make_loaders():
     train, val, test = make_datasets()
     generator = torch.Generator().manual_seed(SEED)
-    train_loader = DataLoader(train, batch_size=BATCH_SIZE, shuffle=True, generator=generator,
-                              num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY and torch.cuda.is_available(), drop_last=DROP_LAST)
+    if WORLD > 1:   # each GPU's process trains on its share of every epoch
+        sampler = torch.utils.data.DistributedSampler(train, num_replicas=WORLD, rank=RANK,
+                                                      shuffle=True, seed=SEED)
+        train_loader = DataLoader(train, batch_size=BATCH_SIZE, sampler=sampler,
+                                  num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY and torch.cuda.is_available(), drop_last=DROP_LAST)
+    else:
+        train_loader = DataLoader(train, batch_size=BATCH_SIZE, shuffle=True, generator=generator,
+                                  num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY and torch.cuda.is_available(), drop_last=DROP_LAST)
     eval_kw = dict(batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY and torch.cuda.is_available())
     return train_loader, DataLoader(val, **eval_kw), DataLoader(test, **eval_kw)
 
@@ -198,6 +208,8 @@ def compute_metrics(outputs: np.ndarray, targets: np.ndarray) -> dict:
 
 # ============================================================== training
 def pick_device() -> torch.device:
+    if WORLD > 1:   # one GPU per process (CPU processes when DEVICE is "cpu")
+        return torch.device("cuda", RANK) if DEVICE != "cpu" else torch.device("cpu")
     if DEVICE != "auto":
         return torch.device(DEVICE)
     if torch.cuda.is_available():
@@ -264,7 +276,7 @@ class GeneratorState:
         return self.generator.get_state()
 
     def load_state_dict(self, state: torch.Tensor) -> None:
-        self.generator.set_state(state)
+        self.generator.set_state(state.cpu())
 
 
 def save_resume(epoch: int, objects: dict, best: tuple) -> None:
@@ -286,14 +298,113 @@ def load_resume(objects: dict, device) -> tuple[int, tuple]:  # noqa: ANN001
     state = torch.load(RESUME_FILE, map_location=device, weights_only=False)
     for name, obj in objects.items():
         obj.load_state_dict(state[name])
-    torch.set_rng_state(state["rng"]["torch"])
+    torch.set_rng_state(state["rng"]["torch"].cpu())
     np.random.set_state(state["rng"]["numpy"])
     if state["rng"]["cuda"] is not None and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["rng"]["cuda"])
+        torch.cuda.set_rng_state_all([s.cpu() for s in state["rng"]["cuda"]])
     if state["rng"].get("mps") is not None and torch.backends.mps.is_available():
-        torch.mps.set_rng_state(state["rng"]["mps"])
+        torch.mps.set_rng_state(state["rng"]["mps"].cpu())
     print(f"resuming after epoch {state['epoch']}", flush=True)
     return state["epoch"], state["best"]
+
+
+class Compiled:
+    """The training steps through torch.compile; plain PyTorch when compiling fails (a
+    layer, platform or Python version it doesn't support), saying why."""
+
+    def __init__(self, model) -> None:  # noqa: ANN001
+        self.model, self.fast, self.working = model, None, False
+        try:
+            self.fast = torch.compile(model)
+        except Exception as exc:  # noqa: BLE001
+            self.failed(exc)
+
+    def failed(self, exc: Exception) -> None:
+        self.fast = None
+        first = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+        print(f"torch.compile did not work, training without it: {first[:300]}", flush=True)
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        if self.fast is not None:
+            try:
+                out = self.fast(x)
+            except Exception as exc:  # noqa: BLE001 — compiling happens at the first call
+                self.failed(exc)
+            else:
+                if not self.working:
+                    self.working = True
+                    print("compiled with torch.compile", flush=True)
+                return out
+        return self.model(x)
+
+
+def checkpoint_layers(model: nn.Module) -> int:
+    """Recompute each layer's activations in the backward pass instead of keeping them.
+    Layers with batch norm keep theirs (recomputing would update its statistics twice)."""
+    from torch.utils.checkpoint import checkpoint
+
+    count = 0
+    for layer in model.children():
+        if (isinstance(layer, (nn.ModuleList, nn.ModuleDict))
+                or not any(p.requires_grad for p in layer.parameters())
+                or any(isinstance(m, nn.modules.batchnorm._BatchNorm) for m in layer.modules())):
+            continue
+
+        def recomputed(*args, _forward=layer.forward, _layer=layer, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            if _layer.training and torch.is_grad_enabled():
+                return checkpoint(_forward, *args, use_reentrant=False, **kwargs)
+            return _forward(*args, **kwargs)
+
+        layer.forward = recomputed
+        count += 1
+    return count
+
+
+def train_together(gpus: int) -> None:
+    """Train on several GPUs of this machine: one process each, forked (so whatever was
+    set on this script carries over), with gradients averaged by DistributedDataParallel.
+    The first process reports and saves; the others only train."""
+    import socket
+    import sys
+
+    import torch.multiprocessing as mp
+
+    count = gpus if DEVICE == "cpu" else min(gpus, torch.cuda.device_count())
+    if count < 2 or sys.platform == "win32":
+        why = ("Windows can't fork the processes" if sys.platform == "win32"
+               else f"{torch.cuda.device_count()} CUDA GPU(s) here")
+        print(f"training on one device: {GPUS} GPUs asked for, {why}", flush=True)
+        globals()["GPUS"] = 1
+        main()
+        return
+    with socket.socket() as probe:   # a free port for the processes to meet on
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    print(f"training on {count} {'CPU processes' if DEVICE == 'cpu' else 'GPUs'} "
+          "(DistributedDataParallel)", flush=True)
+    sys.stdout.flush()
+    mp.start_processes(_one_of_many, args=(count, port), nprocs=count, start_method="fork")
+
+
+def _one_of_many(rank: int, world: int, port: int) -> None:
+    import os
+    import sys
+
+    import torch.distributed as dist
+
+    global RANK, WORLD
+    RANK, WORLD = rank, world
+    if rank:   # one report: the first process's
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+    gpu = DEVICE != "cpu"
+    if gpu:
+        torch.cuda.set_device(rank)
+    dist.init_process_group("nccl" if gpu else "gloo", init_method=f"tcp://127.0.0.1:{port}",
+                            rank=rank, world_size=world)
+    try:
+        main()
+    finally:
+        dist.destroy_process_group()
 
 
 def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
@@ -309,6 +420,14 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
     use_amp = MIXED_PRECISION and device.type in ("cuda", "mps")
     amp_dtype = torch.float16 if device.type == "cuda" else torch.bfloat16
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")
+    net = model   # what the training steps call
+    if WORLD > 1:
+        net = nn.parallel.DistributedDataParallel(
+            model, device_ids=[device.index] if device.type == "cuda" else None,
+            # experts a batch never routes to get no gradient
+            find_unused_parameters=any(hasattr(m, "aux_loss") for m in model.modules()))
+    if COMPILE:
+        net = Compiled(net)
     best_loss, best_state, bad_epochs = float("inf"), None, 0
     reset_peak_memory(device)
     resumable = {"model": model, "optimizer": optimizer, "scaler": scaler}
@@ -324,6 +443,8 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
     for epoch in range(first_epoch, EPOCHS + 1):
         if EPOCH_HOOK is not None:
             EPOCH_HOOK(epoch, model)
+        if hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)   # a new shuffle for every epoch
         model.train()
         started, running, seen = time.time(), 0.0, 0
         optimizer.zero_grad(set_to_none=True)
@@ -331,7 +452,7 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
         for step, (xb, yb) in enumerate(train_loader, start=1):
             xb, yb = xb.to(device), yb.to(device)
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-                out, target = adapt(model(xb), yb)
+                out, target = adapt(net(xb), yb)
                 loss = loss_fn(out, target)
                 if LOSS_HOOK is not None:
                     loss = LOSS_HOOK(loss, out, xb, model)
@@ -349,6 +470,10 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
             seen += len(xb)
         if epoch == 1 and log:
             report_resources(device, (time.time() - started) / max(step, 1))
+        if WORLD > 1:   # the loss over every process's share
+            totals = torch.tensor([running, float(seen)], device=device)
+            torch.distributed.all_reduce(totals)
+            running, seen = totals.tolist()
         train_loss = running / max(seen, 1)
         val_loss, val_metrics = evaluate(model, loss_fn, val_loader, device)
         monitored = val_loss if not math.isnan(val_loss) else train_loss
@@ -368,7 +493,7 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
                 if log:
                     print(f"early stopping: no improvement for {EARLY_STOP} epochs")
                 break
-        if log and RESUME_FILE:
+        if log and RESUME_FILE and RANK == 0:
             save_resume(epoch, resumable, (best_loss, best_state, bad_epochs))
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -607,6 +732,9 @@ def save_calibration(train_loader: DataLoader, test_loader: DataLoader) -> None:
 
 
 def main() -> None:
+    if GPUS > 1 and WORLD == 1:
+        train_together(GPUS)
+        return
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     device = pick_device()
@@ -621,7 +749,12 @@ def main() -> None:
     if PREPARE_HOOK is not None:
         model = PREPARE_HOOK(model)
     print(f"parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    if CHECKPOINTING:
+        print(f"gradient checkpointing: {checkpoint_layers(model)} layers recompute their "
+              "activations")
     model, loss_fn = fit(model, train_loader, val_loader, device)
+    if RANK:   # the first process saves and reports
+        return
     if BEFORE_SAVE is not None:
         BEFORE_SAVE(model)
     torch.save(model.state_dict(), CHECKPOINT)

@@ -150,3 +150,74 @@ def test_the_keras_template_saves_and_clears_its_resume_state():
     assert "RESUME = False" in source and "class SaveResume" in source
     assert "initial_epoch=first_epoch" in source
     assert 'for name in (RESUME_FILE, "resume.extra.pkl", "resume.json")' in source
+
+
+# ------------------------------------------------------------ Phase 1: faster and bigger
+def _trained(tmp_path, name: str, **trainer) -> tuple[str, dict]:
+    graph = _resumable_design(epochs=3)
+    node = next(n for n in graph["nodes"] if n["type"] == "train.trainer")
+    node["params"].update(device="cpu", **trainer)
+    folder = tmp_path / name
+    folder.mkdir()
+    done = _run(folder, export_training(Graph.from_dict(graph), "pytorch", folder))
+    assert done.returncode == 0, done.stderr[-3000:]
+    return done.stdout, json.loads((folder / "metrics.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.slow
+def test_gradient_checkpointing_trains_the_same_model(tmp_path):
+    pytest.importorskip("torch")
+    plain_out, plain = _trained(tmp_path, "plain")
+    out, metrics = _trained(tmp_path, "checkpointed", gradient_checkpointing=True)
+    assert "gradient checkpointing: 2 layers recompute their activations" in out
+    assert metrics == plain
+    epochs = [line.rsplit(" (", 1)[0] for line in out.splitlines() if line.startswith("epoch")]
+    assert epochs == [line.rsplit(" (", 1)[0] for line in plain_out.splitlines()
+                      if line.startswith("epoch")]
+
+
+@pytest.mark.slow
+def test_compile_trains_or_says_why_not(tmp_path):
+    pytest.importorskip("torch")
+    out, metrics = _trained(tmp_path, "compiled", compile=True)
+    assert "compiled with torch.compile" in out or "torch.compile did not work" in out
+    assert metrics["accuracy"] > 0.5
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(__import__("sys").platform == "win32", reason="the processes are forked")
+def test_several_processes_train_together(tmp_path):
+    pytest.importorskip("torch")
+    out, metrics = _trained(tmp_path, "together", gpus=2)
+    assert "training on 2 CPU processes (DistributedDataParallel)" in out
+    assert [line.split()[1] for line in out.splitlines() if line.startswith("epoch")] == \
+        ["1/3", "2/3", "3/3"]                      # one report, not one per process
+    assert out.count("saved best weights") == 1 and metrics["accuracy"] > 0.5
+
+
+def test_trainer_settings_reach_the_script():
+    from ai_made_easy.core.training.generate import generate_training
+
+    graph = _resumable_design()
+    node = next(n for n in graph["nodes"] if n["type"] == "train.trainer")
+    node["params"].update(compile=True, gradient_checkpointing=True, gpus=4)
+    source = generate_training(Graph.from_dict(graph), "pytorch")
+    assert "COMPILE = True" in source and "CHECKPOINTING = True" in source
+    assert "GPUS = 4" in source and "DistributedSampler" in source
+    keras = generate_training(Graph.from_dict(graph), "keras")
+    assert "compiling, gradient checkpointing, several GPUs apply to PyTorch" in keras
+    plain = generate_training(Graph.from_dict(_resumable_design()), "pytorch")
+    assert "GPUS = 1" in plain and "COMPILE = False" in plain
+
+
+def test_checkpointing_lowers_the_memory_estimate():
+    from ai_made_easy.core import budget
+
+    graph = Graph.from_dict(_resumable_design())
+    before = budget.estimate(graph)
+    next(n for n in graph.nodes.values() if n.type_id == "train.trainer").params[
+        "gradient_checkpointing"] = True
+    after = budget.estimate(graph)
+    assert after.checkpointing and after.train_memory_bytes() <= before.train_memory_bytes()
+    device = budget.get_device("rtx_3060")
+    assert after.step_time_ms(device) == pytest.approx(before.step_time_ms(device) * 4 / 3)

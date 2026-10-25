@@ -10,7 +10,8 @@ Summary can show estimate vs measured once a real run has calibrated them.
   sequence terms; element-wise blocks cost one op per output value.
 * Training memory: weights + gradients + optimizer state for trainable
   weights, plus saved activations × batch (halved by mixed precision), plus the
-  device's runtime overhead.
+  device's runtime overhead. Gradient checkpointing keeps about two layers'
+  activations instead of every layer's, and adds a forward pass to each step.
 * Inference latency (batch 1): compute time at a realistic fraction of the
   device's peak + memory traffic over its bandwidth + a small launch cost per
   kernel (one per block; composite blocks declare ``meta["kernels"]``).
@@ -161,6 +162,7 @@ class Estimate:
     batch_size: int = 1
     mixed_precision: bool = False
     accumulation_steps: int = 1
+    checkpointing: bool = False     # the Trainer's gradient checkpointing
     optimizer_states: int = 2
     layers: list[LayerCost] = field(default_factory=list)
     device: Device | None = None
@@ -189,7 +191,10 @@ class Estimate:
         weights = self.params * 4 + (self.params * 2 if amp else 0)  # fp16 copy under AMP
         grads = self.trainable_params * 4
         states = self.trainable_params * 4 * self.optimizer_states
-        acts = self.activations * batch * (2 if amp else 4) * SAVED_ACTIVATION_FACTOR
+        saved = self.activations
+        if self.checkpointing:   # one layer recomputed at a time, plus its neighbours' inputs
+            saved = min(saved, 2 * max((layer.activations for layer in self.layers), default=0))
+        acts = saved * batch * (2 if amp else 4) * SAVED_ACTIVATION_FACTOR
         overhead = (self.device.overhead_gb if self.device else 0.0) * GB
         return int(weights + grads + states + acts + overhead)
 
@@ -213,12 +218,13 @@ class Estimate:
         return sum(layer.kernels for layer in self.layers)
 
     def step_time_ms(self, device: Device | None = None) -> float | None:
-        """One training step (forward + backward ≈ 3× forward) at the batch size."""
+        """One training step (forward + backward ≈ 3× forward; 4× when checkpointing
+        recomputes the forward) at the batch size."""
         device = device or self.device
         if device is None:
             return None
         tflops = device.tflops_fp16 if self.mixed_precision else device.tflops_fp32
-        return 3 * self.flops * self.batch_size / (tflops * 1e12 * COMPUTE_EFFICIENCY) * 1e3
+        return (4 if self.checkpointing else 3) * self.flops * self.batch_size / (tflops * 1e12 * COMPUTE_EFFICIENCY) * 1e3
 
     def fitting_batch(self, limit_bytes: float, mixed_precision: bool | None = None) -> int:
         """Largest power-of-two batch whose training memory fits ``limit_bytes`` (0: none)."""
@@ -377,6 +383,7 @@ def _apply_training_settings(graph, est: Estimate) -> None:  # noqa: ANN001
             est.batch_size = int(p.get("batch_size") or 1)
             est.mixed_precision = bool(p.get("mixed_precision"))
             est.accumulation_steps = int(p.get("accumulation_steps") or 1)
+            est.checkpointing = bool(p.get("gradient_checkpointing"))
         elif node.type_id == "prep.dataloader":
             batch = int(node.resolved_params().get("batch_size") or 0)
             if batch:
