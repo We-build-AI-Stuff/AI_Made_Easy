@@ -19,7 +19,7 @@ boilerplate. It runs on the desktop or in the browser.
   it in **Run on**; live curves, Stop, sweeps and pipelines work the same, and a dropped
   connection picks up where it left off. Sign-in stays with each tool: AI Made Easy never
   asks for a password, token or key ([docs/REMOTE.md](docs/REMOTE.md)).
-- **Export everywhere:** ONNX, TorchScript, Core ML, OpenVINO, ExecuTorch and LiteRT, with int8
+- **Export everywhere:** ONNX, TorchScript, Core ML, OpenVINO, ExecuTorch, LiteRT and GGUF, with int8
   quantization calibrated on the run's own samples. Every export is checked against the
   trained model before it is packaged. Detectors keep their post-processing (NMS) and
   graph networks take graphs of any size. The project's budget device suggests the
@@ -62,6 +62,18 @@ boilerplate. It runs on the desktop or in the browser.
   ArcFace, CosFace, triplet and supervised contrastive losses for embeddings; SAM and
   Schedule-Free AdamW; weight averaging (EMA, SWA); Integrated Gradients; target encoding
   and SMOTE for classic models; Tiny Llama, Vision Transformer, ConvNeXt and ArcFace recipes.
+- **Bigger models, fairer models, GGUF (3.11).** PyTorch networks train in bfloat16,
+  shard across GPUs (FSDP) and fine-tune for int8 (quantization-aware training). Several
+  GPUs work on Windows and with k-fold and metric losses, and Keras compiles.
+  - **Fairness:** group weights keep a group column from predicting the class in
+    training, and a threshold per group evens out a classifier's error rates, shown
+    before and after.
+  - **GGUF:** Llama-style language models export to GGUF for llama.cpp and Ollama.
+  - **What would change it?** Try it shows the smallest edits to a table row that change
+    the prediction.
+
+  ![A threshold per group: each group's rates before and after](docs/images/web_threshold_per_group.png)
+  ![What would change it: the smallest edits that change a prediction](docs/images/web_what_would_change.png)
 - **Several GPUs, resume anywhere, fairness by group (3.10).** PyTorch networks can
   train on several GPUs, compile with `torch.compile` and checkpoint activations to save
   memory. Keras runs and runs on SSH, Modal, containers, Kaggle and Colab resume where
@@ -232,6 +244,7 @@ Install only what you need with the optional extras:
 | `edge` | On-device exports: ExecuTorch (`.pte`) and the LiteRT interpreter |
 | `coreml` | Core ML exports (`.mlpackage`), checked against PyTorch when exported on a Mac |
 | `openvino` | OpenVINO exports (Intel CPUs, GPUs and NPUs), checked against PyTorch on the CPU |
+| `gguf` | GGUF exports of Llama-style language models (llama.cpp, Ollama, LM Studio); add `llama-cpp-python` to check them |
 | `tracking` | Mirror runs to MLflow and Weights & Biases |
 | `hub` | The Hugging Face Hub: push runs and Spaces, load Hub datasets |
 | `kaggle` / `modal` | Train on Kaggle / Modal; Kaggle datasets and competitions |

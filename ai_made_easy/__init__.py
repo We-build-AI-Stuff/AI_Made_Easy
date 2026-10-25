@@ -6,7 +6,7 @@ Design rules that keep this scalable to agents/MCP:
 """
 import os as _os
 
-__version__ = "3.10.0"
+__version__ = "3.11.0"
 
 # Child processes (training workers, Try it, generated scripts) talk to the app through
 # pipes. On Windows a piped Python writes in the locale code page, so a non-ASCII class

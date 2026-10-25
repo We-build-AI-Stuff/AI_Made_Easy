@@ -249,3 +249,67 @@ test("docs screenshots: 3.10 fairness by group", async ({ page, request }) => {
   await expect(page.getByTestId("fairness")).toBeVisible({ timeout: 120_000 });
   await page.getByRole("dialog").screenshot({ path: `${OUT}/web_fairness_by_group.png` });
 });
+
+test("docs screenshots: 3.11 a threshold per group, and what would change it", async ({ page, request }) => {
+  test.setTimeout(300_000);
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  let seed = 11;
+  const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const rows = ["income,debt,region,approved"];
+  for (let i = 0; i < 1500; i++) {
+    let [inc, debt] = [rand(), rand()];
+    const region = ["north", "south", "east"][i % 3];
+    const label = inc - 0.6 * debt > 0.2 ? 1 : 0;
+    if (region === "east") inc *= 0.7;              // incomes recorded low in one region
+    rows.push(`${(inc * 100).toFixed(1)},${(debt * 50).toFixed(1)},${region},${label}`);
+  }
+  const table = join(mkdtempSync(join(tmpdir(), "aime-shot-")), "loans.csv");
+  writeFileSync(table, rows.join("\n") + "\n");
+  const chain = ["in", "d1", "act", "d2", "out"];
+  const design = {
+    schema_version: 3, name: "loans", meta: {},
+    nodes: [
+      { id: "in", type: "core.input", params: { shape: "2" }, position: [0, 0] },
+      { id: "d1", type: "core.dense", params: { units: 16 }, position: [0, 0] },
+      { id: "act", type: "core.relu", params: {}, position: [0, 0] },
+      { id: "d2", type: "core.dense", params: { units: 2 }, position: [0, 0] },
+      { id: "out", type: "core.output", params: {}, position: [0, 0] },
+      { id: "data", type: "data.csv", params: { path: table, target_column: "approved" }, position: [0, 0] },
+      { id: "drop", type: "prep.drop_columns", params: { columns: "region" }, position: [0, 0] },
+      { id: "opt", type: "train.adam", params: { lr: 0.02 }, position: [0, 0] },
+      { id: "loss", type: "train.loss_cross_entropy", params: {}, position: [0, 0] },
+      { id: "acc", type: "eval.accuracy", params: {}, position: [0, 0] },
+      { id: "trainer", type: "train.trainer",
+        params: { epochs: 10, batch_size: 32, device: "cpu", seed: 0 }, position: [0, 0] },
+    ],
+    edges: chain.slice(1).map((b, i) => ({ from: `${chain[i]}/out`, to: `${b}/in` })),
+  };
+  const started = await (await request.post("/api/runs", { data: { graph: design, project: "loans" } })).json();
+  await expect.poll(async () => (await (await request.get(`/api/runs/${started.run_id}`)).json()).status,
+    { timeout: 200_000 }).toBe("finished");
+  await page.goto("/");
+  await page.getByRole("button", { name: "Experiments" }).click();
+  await page.getByLabel(/only “/).uncheck();
+  await page.getByTestId("runs").locator("tr", { hasText: started.run_id }).click();
+  await page.getByTestId("groups-run").click();
+  await page.locator("#group-column").selectOption("region");
+  await page.getByTestId("score-groups").click();
+  await expect(page.getByTestId("thresholds")).toBeVisible({ timeout: 120_000 });
+  await page.getByRole("dialog").screenshot({ path: `${OUT}/web_threshold_per_group.png` });
+  await page.keyboard.press("Escape");
+
+  await page.getByTestId("try-run").click();
+  const dialog = page.getByRole("dialog", { name: `Try run ${started.run_id}` });
+  await expect(dialog.getByTestId("try-form")).toHaveAttribute("data-kind", "records", { timeout: 60_000 });
+  await dialog.locator("#try-income").fill("30");
+  await dialog.locator("#try-debt").fill("30");
+  await dialog.getByTestId("try-predict").click();
+  const panel = dialog.getByTestId("what-would-change");
+  await expect(panel).toBeVisible({ timeout: 60_000 });
+  await panel.getByTestId("cf-search").click();
+  await expect(panel.getByTestId("cf-results")).toContainText("Goal: predicted 1 (now 0)", { timeout: 60_000 });
+  await panel.scrollIntoViewIfNeeded();
+  await panel.screenshot({ path: `${OUT}/web_what_would_change.png` });
+});
