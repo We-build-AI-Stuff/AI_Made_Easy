@@ -238,7 +238,7 @@ function WhatWouldChange({ runId, row, columns, prediction }: {
           <div className="field"><label htmlFor="cf-target">Reach the value</label>
             <input id="cf-target" type="number" value={target} onChange={(e) => setTarget(e.target.value)} /></div>
         )}
-        <fieldset className="field"><legend>Keep as they are</legend>
+        <fieldset className="locks"><legend>Keep as they are</legend>
           {columns.map((c) => (
             <label key={c} className="check">
               <input type="checkbox" checked={locked.includes(c)} data-testid={`cf-lock-${c}`}
