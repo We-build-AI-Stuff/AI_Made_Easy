@@ -19,11 +19,12 @@ boilerplate. It runs on the desktop or in the browser.
   it in **Run on**; live curves, Stop, sweeps and pipelines work the same, and a dropped
   connection picks up where it left off. Sign-in stays with each tool: AI Made Easy never
   asks for a password, token or key ([docs/REMOTE.md](docs/REMOTE.md)).
-- **Export everywhere:** ONNX, TorchScript, Core ML, OpenVINO, ExecuTorch, LiteRT and GGUF, with int8
-  quantization calibrated on the run's own samples. Every export is checked against the
-  trained model before it is packaged. Detectors keep their post-processing (NMS) and
-  graph networks take graphs of any size. The project's budget device suggests the
-  format, and a design rule names why a design can't reach one
+- **Export everywhere:** ONNX, TorchScript, Core ML, OpenVINO, ExecuTorch, LiteRT and GGUF, with
+  int8 quantization calibrated on the run's own samples. Each export is checked against
+  the trained model before it is packaged, wherever its runtime is installed (Core ML on
+  a Mac, GGUF with `llama-cpp-python`); the report says when one wasn't. Detectors keep
+  their post-processing (NMS) and graph networks take graphs of any size. The project's
+  budget device suggests the format, and a design rule names why a design can't reach one
   ([docs/EXPORT.md](docs/EXPORT.md); what every task serves and exports:
   [docs/DEPLOY.md](docs/DEPLOY.md)).
 - **Work with your tools:** runs mirror to MLflow and Weights & Biases as they train,
