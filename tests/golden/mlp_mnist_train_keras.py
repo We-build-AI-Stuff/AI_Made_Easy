@@ -300,6 +300,7 @@ def main() -> None:
     deploy_model = keras.Model(raw, model(normalize(raw)), name="mnist_mlp_deploy")
     optimizer = keras.optimizers.Adam(learning_rate=0.001, beta_1=0.9, beta_2=0.999, epsilon=1e-08)
     train_model.compile(optimizer=optimizer, loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True), jit_compile=COMPILE)
+    optimizer = train_model.optimizer   # mixed_float16 wraps it in a LossScaleOptimizer
     callbacks = [EpochReport(x_val, y_val)]
     if EARLY_STOP:
         callbacks.append(keras.callbacks.EarlyStopping(

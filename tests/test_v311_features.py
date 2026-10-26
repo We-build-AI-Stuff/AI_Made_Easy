@@ -189,14 +189,18 @@ def test_spawned_processes_warn_about_settings_they_cant_get(tmp_path):
 
 
 @pytest.mark.slow
-def test_keras_retries_from_the_state_before_compiling(tmp_path):
+@pytest.mark.parametrize("mixed", [False, True], ids=["float32", "mixed_float16"])
+def test_keras_retries_from_the_state_before_compiling(tmp_path, mixed):
     """A failed jit_compile that already took a step: the retry starts from the weights
-    and optimizer state from before, so the run ends as one that never compiled."""
+    and optimizer state from before, so the run ends as one that never compiled. With
+    mixed precision the optimizer compiled is the loss-scaling wrapper, whose state counts
+    too."""
     keras = pytest.importorskip("keras")
     if keras.backend.backend() != "torch":
         pytest.skip("checked on the torch backend")
     plain = tmp_path / "plain"
-    _ok(_run(plain, _script(_dropout(_design(epochs=2)), plain, "keras")))
+    _ok(_run(plain, _script(_dropout(_design(epochs=2, mixed_precision=mixed)), plain,
+                            "keras")))
     retried = tmp_path / "retried"
     broken = ("import keras\n"
               "real = keras.Model.fit\n"
@@ -212,8 +216,8 @@ def test_keras_retries_from_the_state_before_compiling(tmp_path):
               "    print(f'retry: step {int(self.optimizer.iterations)}, momentum {moved}', flush=True)\n"
               "    return real(self, x, y, *args, **kwargs)\n"
               "keras.Model.fit = fit")
-    out = _ok(_run(retried, _script(_dropout(_design(epochs=2, compile=True)), retried,
-                                    "keras"), broken))
+    out = _ok(_run(retried, _script(_dropout(_design(epochs=2, compile=True,
+                                                    mixed_precision=mixed)), retried, "keras"), broken))
     assert "jit_compile did not work" in out
     assert "retry: step 0, momentum 0.0" in out       # the failed step's momentum is gone
     for name in ("metrics.json", "predictions.json"):   # and dropout draws as if never compiled
