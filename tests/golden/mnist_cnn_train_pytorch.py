@@ -291,8 +291,10 @@ def save_resume(epoch: int, objects: dict, best: tuple) -> None:
     tmp = Path(RESUME_FILE + ".tmp")
     torch.save(state, tmp)
     tmp.replace(RESUME_FILE)
-    Path(RESUME_FILE).with_suffix(".json").write_text(   # read by the app, without torch
-        json.dumps({"epoch": epoch, "epochs": EPOCHS}), encoding="utf-8")
+    info = Path(RESUME_FILE).with_suffix(".json")   # read by the app, without torch
+    info.with_suffix(".json.tmp").write_text(json.dumps({"epoch": epoch, "epochs": EPOCHS}),
+                                             encoding="utf-8")
+    info.with_suffix(".json.tmp").replace(info)   # a stop mid-write leaves the last one whole
 
 
 def load_resume(objects: dict, device) -> tuple[int, tuple]:  # noqa: ANN001
