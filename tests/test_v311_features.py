@@ -147,9 +147,14 @@ _WORKER_BREAKS = ("def broken(*args):\n"
 _FIRST_BREAKS = ("real = m.main\n"
                  "def main():\n"
                  "    if m.RANK == 0 and m.WORLD > 1:\n"
+                 "        print(f'breaking after {time.time() - began:.1f}s', file=sys.stderr)\n"
                  "        raise RuntimeError('the first process broke')\n"
                  "    real()\n"
                  "m.main = main")
+# where a slow stop spends its time: every thread's stack, if it's still going after 40 s
+_TIMED = ("import faulthandler, sys, time\n"
+          "began = time.time()\n"
+          "faulthandler.dump_traceback_later(40, exit=False)\n")
 
 
 @pytest.mark.slow
@@ -162,10 +167,10 @@ def test_a_failing_process_stops_the_run(tmp_path, breaks):
 
     pytest.importorskip("torch")
     started = time.time()
-    done = _run(tmp_path, _script(_design(gpus=2, epochs=50), tmp_path), breaks)
+    done = _run(tmp_path, _script(_design(gpus=2, epochs=50), tmp_path), _TIMED + breaks)
     assert done.returncode != 0
     took = time.time() - started
-    assert took < 120, (f"{took:.0f}s", done.stdout[-1500:], done.stderr[-1500:])
+    assert took < 120, f"{took:.0f}s\n{done.stdout[-1500:]}\n{done.stderr[-8000:]}"
     if breaks is _WORKER_BREAKS:
         assert "a training process stopped (exit code 3): stopping the run" in done.stdout
     else:
@@ -381,3 +386,32 @@ def test_a_copy_of_a_checkpointed_model_runs_its_own_layers(tmp_path):
     pytest.importorskip("torch")
     script = _script(_design(gradient_checkpointing=True), tmp_path)
     assert "copies run their own layers" in _ok(_run(tmp_path, script, _COPIES))
+
+
+# ------------------------------------------------------------ fixed along the way
+_CUT_SHORT = ("import pathlib\n"
+              "real = pathlib.Path.write_text\n"
+              "def write_text(self, data, *args, **kwargs):\n"
+              "    if self.name.startswith('resume.json') and '\"epoch\": 3' in data:\n"
+              "        real(self, data[:5], *args, **kwargs)\n"
+              "        raise SystemExit('stopped while saving')\n"
+              "    return real(self, data, *args, **kwargs)\n"
+              "pathlib.Path.write_text = write_text")
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("framework", ["pytorch", "keras"])
+def test_a_run_stopped_while_saving_still_resumes(tmp_path, framework):
+    """A stop in the middle of writing resume.json (a fast run writes it many times a
+    second) leaves the previous epoch's, whole, so the run still resumes."""
+    from test_v39_features import _resumable_design
+
+    if framework == "keras":
+        keras = pytest.importorskip("keras")
+        if keras.backend.backend() != "torch":
+            pytest.skip("checked on the torch backend")
+    else:
+        pytest.importorskip("torch")
+    cut = _run(tmp_path, _script(_resumable_design(), tmp_path, framework), _CUT_SHORT)
+    assert cut.returncode != 0 and "stopped while saving" in cut.stderr, cut.stderr[-2000:]
+    assert json.loads((tmp_path / "resume.json").read_text(encoding="utf-8"))["epoch"] == 2

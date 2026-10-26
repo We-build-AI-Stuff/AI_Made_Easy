@@ -275,8 +275,9 @@ class SaveResume(keras.callbacks.Callback):
             pickle.dump(state, fh)
         tmp.replace(self.weights)
         self.extra.with_suffix(".tmp").replace(self.extra)
-        self.info.write_text(json.dumps({"epoch": epoch + 1, "epochs": EPOCHS}),
-                             encoding="utf-8")
+        self.info.with_suffix(".json.tmp").write_text(
+            json.dumps({"epoch": epoch + 1, "epochs": EPOCHS}), encoding="utf-8")
+        self.info.with_suffix(".json.tmp").replace(self.info)   # a stop mid-write keeps the last
 
 
 def main() -> None:
