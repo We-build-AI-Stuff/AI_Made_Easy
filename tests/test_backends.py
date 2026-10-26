@@ -215,6 +215,7 @@ def test_ssh_stop_and_reattach(manager, fake_ssh, isolated_home):
     deadline = time.time() + 120
     while not manager.history.epochs(run_id) and time.time() < deadline:
         time.sleep(0.2)
+    assert manager.history.epochs(run_id), "no epoch recorded after 120s"
     # the app "restarts": the old follower no longer writes the record, and a new
     # manager follows the still-running remote run again
     manager.get(run_id).history = None
@@ -386,6 +387,7 @@ def test_colab_through_drive_for_desktop(manager, tmp_path):
     deadline = time.time() + 30
     while not book_path.exists() and time.time() < deadline:
         time.sleep(0.1)
+    assert book_path.exists(), "no notebook after 30s"
     book = json.loads(book_path.read_text(encoding="utf-8"))
     assert "drive.mount" in "".join(book["cells"][1]["source"])
     assert manager.status(run_id)["state"] == "running"
@@ -394,6 +396,29 @@ def test_colab_through_drive_for_desktop(manager, tmp_path):
     assert result["record"].status == "finished", result["record"].error
     assert [e["epoch"] for e in result["epochs"]] == [1, 2]
     assert result["record"].final_metrics
+
+
+def test_colab_clears_a_previous_attempt_in_its_drive_folder(manager, tmp_path, monkeypatch):
+    """A resumed Colab run reuses its Drive folder: the last attempt's exit code and events
+    are removed, or the follow would end the new attempt before the notebook runs."""
+    from ai_made_easy.core.runs import history
+
+    monkeypatch.setattr(history, "new_run_id", lambda: "20260101-000000-abcd")
+    drive = tmp_path / "My Drive"
+    folder = drive / "AI Made Easy" / "runs" / "20260101-000000-abcd"
+    folder.mkdir(parents=True)
+    (folder / "exit_code").write_text("0", encoding="utf-8")
+    (folder / "events.jsonl").write_text('{"type": "epoch", "epoch": 1}\n', encoding="utf-8")
+    backends.save("colab-drive", "colab", drive_folder=str(drive), poll_seconds=0.1)
+    run_id = manager.start(_design(epochs=2), on="colab-drive")
+    assert run_id == "20260101-000000-abcd"
+    deadline = time.time() + 30
+    while not (drive / "AI Made Easy" / f"{run_id}.ipynb").exists() and time.time() < deadline:
+        time.sleep(0.1)
+    time.sleep(1)                      # several polls of the folder
+    assert not (folder / "exit_code").exists() and not (folder / "events.jsonl").exists()
+    assert manager.status(run_id)["state"] == "running"
+    manager.stop(run_id)
 
 
 def test_colab_manual_hand_off_and_import(manager, tmp_path):
@@ -406,6 +431,7 @@ def test_colab_manual_hand_off_and_import(manager, tmp_path):
     deadline = time.time() + 30
     while not book_path.exists() and time.time() < deadline:
         time.sleep(0.1)
+    assert book_path.exists(), "no notebook after 30s"
     book = json.loads(book_path.read_text(encoding="utf-8"))
     # in Colab: the %%writefile cell, the run cell, then the zip download
     source = "".join(book["cells"][1]["source"]).split("\n", 1)[1]

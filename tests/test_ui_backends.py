@@ -54,6 +54,7 @@ def test_train_on_an_ssh_host_from_the_training_panel(
     while not ctx.validation_store.valid and time.time() < deadline:
         app.processEvents()
         time.sleep(0.05)
+    assert ctx.validation_store.valid, "the design never validated"
     finished: list = []
     epochs: list = []
     service = ctx.process_service

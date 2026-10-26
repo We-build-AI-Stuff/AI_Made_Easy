@@ -1,9 +1,10 @@
 """OpenVINO export of the 3.7 and 3.8 layers (3.10).
 
 Each layer's harness design (scripts/verify_codegen.py) is exported to OpenVINO's IR,
-run on the CPU and must match PyTorch (``exporters.FLOAT_TOL``). A layer that can't is
-listed in the export rules (``deploy/exportability.py``) with the reason, so users see
-it before exporting.
+run on the CPU and must match PyTorch (``exporters.FLOAT_TOL``, or ``ARM_TOL`` on ARM
+CPUs; CI runs it on x86 Linux and Apple silicon). A layer that can't is listed in the
+export rules (``deploy/exportability.py``) with the reason, so users see it before
+exporting.
 """
 from __future__ import annotations
 
@@ -14,9 +15,6 @@ import pytest
 
 pytest.importorskip("torch")
 pytest.importorskip("openvino")
-if __import__("platform").machine().lower() not in ("x86_64", "amd64"):
-    pytest.skip("checked on x86: OpenVINO's ARM CPU runtime lacks some operators "
-                "(group norm) and computes some in lower precision", allow_module_level=True)
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))

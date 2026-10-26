@@ -85,7 +85,15 @@ def _wait(condition, timeout: float = 120, what=lambda: "the run") -> None:  # n
 
 @pytest.mark.slow
 def test_a_stopped_ssh_run_resumes_on_its_host(isolated_home, fake_ssh):  # noqa: F811
+    """The resumed run reuses the stopped one's folder on the host. The launcher starts
+    slowly here, so the follower always looks before it: the stopped attempt's events
+    and exit code must already be gone."""
+    import sys
+
     pytest.importorskip("torch")
+    python3 = fake_ssh.parent / "remote-bin" / "python3"
+    python3.write_text('#!/bin/sh\ncase "$1" in aime_launch.py) sleep 3;; esac\n'
+                       f'exec "{sys.executable}" "$@"\n', encoding="utf-8")
     mgr = RunManager()
     api.set_manager(mgr)
     try:
@@ -100,11 +108,14 @@ def test_a_stopped_ssh_run_resumes_on_its_host(isolated_home, fake_ssh):  # noqa
         after = api.resume_info(run_id)["after_epoch"]
         assert after >= 2
         assert api.resume_run(run_id)["after_epoch"] == after
-        # a slow runner takes a while to send the bundle out again and start the script
-        _wait(lambda: mgr.history.get(run_id).epochs_done > after + 1, 300,
-              lambda: f"the resumed run ({list(mgr.get(run_id).logs)[-5:]})")
+        # a slow runner takes a while to send the bundle out again and start the script;
+        # the stopped run's own epochs count until the resumed script says where it starts
+        _wait(lambda: any("resuming after epoch" in line for line in mgr.get(run_id).logs),
+              300, lambda: f"the resumed run ({list(mgr.get(run_id).logs)[-5:]})")
         logs = mgr.get(run_id).logs
         assert any(f"resuming after epoch {after}" in line for line in logs), logs[-20:]
+        _wait(lambda: mgr.history.get(run_id).epochs_done > after + 1, 300,
+              lambda: f"the resumed run ({list(mgr.get(run_id).logs)[-5:]})")
         assert any("connected" in line for line in logs)
         mgr.stop(run_id)
         mgr.wait(run_id, 120)
@@ -246,7 +257,8 @@ def test_trainer_settings_reach_the_script():
     assert "COMPILE = True" in source and "CHECKPOINTING = True" in source
     assert "GPUS = 4" in source and "DistributedSampler" in source
     keras = generate_training(Graph.from_dict(graph), "keras")
-    assert "compiling, gradient checkpointing, several GPUs apply to PyTorch" in keras
+    assert "gradient checkpointing, several GPUs apply to PyTorch" in keras
+    assert "COMPILE = True" in keras
     plain = generate_training(Graph.from_dict(_resumable_design()), "pytorch")
     assert "GPUS = 1" in plain and "COMPILE = False" in plain
 

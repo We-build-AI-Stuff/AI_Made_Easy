@@ -36,6 +36,7 @@ KERAS_TRANSPOSE = (0, 2, 3, 1)  # channels-first -> the model's Keras layout
 NUM_CLASSES = 10
 MODEL_FILE = "mnist_mlp_best.keras"
 CALLBACKS = []          # more Keras callbacks for fit (e.g. the learning-rate finder)
+COMPILE = False         # jit_compile (torch.compile on the PyTorch backend)
 RESUME = False          # continue from RESUME_FILE (resume an interrupted run)
 RESUME_FILE = "resume.weights.h5"   # weights and optimizer, saved after each epoch ("" = off)
 CLASS_NAMES = None
@@ -192,6 +193,37 @@ class EpochReport(keras.callbacks.Callback):
               f"({time.time() - self.started:.1f}s)", flush=True)
 
 
+def random_state(model: keras.Model) -> dict:
+    """Every random generator training draws on: Python's, NumPy's, PyTorch's (unseeded
+    dropout uses the device's own) and the layers' (dropout, augmentation)."""
+    torch_state = None
+    if keras.backend.backend() == "torch":
+        import torch
+
+        torch_state = {
+            "cpu": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "mps": torch.mps.get_rng_state() if torch.backends.mps.is_available() else None}
+    return {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch_state,
+            "seeds": [keras.ops.convert_to_numpy(g.state) for g in SaveResume.seeds(model)]}
+
+
+def set_random_state(model: keras.Model, state: dict, layers: bool = True) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    if state["torch"] is not None:
+        import torch
+
+        torch.set_rng_state(state["torch"]["cpu"])
+        if state["torch"]["cuda"] is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(state["torch"]["cuda"])
+        if state["torch"]["mps"] is not None and torch.backends.mps.is_available():
+            torch.mps.set_rng_state(state["torch"]["mps"])
+    if layers:
+        for generator, value in zip(SaveResume.seeds(model), state["seeds"], strict=True):
+            generator.state.assign(value)
+
+
 class SaveResume(keras.callbacks.Callback):
     """After each epoch, what training needs to continue: the weights and optimizer
     (RESUME_FILE), the random state and the other callbacks' counters (early stopping,
@@ -231,39 +263,21 @@ class SaveResume(keras.callbacks.Callback):
             return
         for callback, kept in zip(self.callbacks, state["callbacks"], strict=True):
             callback.__dict__.update(kept)
-        random.setstate(state["python"])
-        np.random.set_state(state["numpy"])
-        if state["torch"] is not None:
-            import torch
-
-            torch.set_rng_state(state["torch"]["cpu"])
-            if state["torch"]["cuda"] is not None and torch.cuda.is_available():
-                torch.cuda.set_rng_state_all(state["torch"]["cuda"])
-            if state["torch"]["mps"] is not None and torch.backends.mps.is_available():
-                torch.mps.set_rng_state(state["torch"]["mps"])
+        set_random_state(self.model, state, layers=False)   # the layers' came back in load
 
     def on_epoch_end(self, epoch, logs=None) -> None:
         tmp = self.weights.with_name("resume.tmp.weights.h5")
         self.model.save_weights(tmp, overwrite=True)
-        torch_state = None
-        if keras.backend.backend() == "torch":
-            import torch
-
-            torch_state = {   # unseeded dropout draws on the device's own generator
-                "cpu": torch.get_rng_state(),
-                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-                "mps": torch.mps.get_rng_state() if torch.backends.mps.is_available() else None}
-        state = {"epoch": epoch + 1, "python": random.getstate(),
-                 "numpy": np.random.get_state(), "torch": torch_state,
-                 "seeds": [keras.ops.convert_to_numpy(g.state) for g in self.seeds(self.model)],
+        state = {"epoch": epoch + 1, **random_state(self.model),
                  "callbacks": [{k: v for k, v in vars(c).items() if k in self.KEPT}
                                for c in self.callbacks]}
         with open(self.extra.with_suffix(".tmp"), "wb") as fh:
             pickle.dump(state, fh)
         tmp.replace(self.weights)
         self.extra.with_suffix(".tmp").replace(self.extra)
-        self.info.write_text(json.dumps({"epoch": epoch + 1, "epochs": EPOCHS}),
-                             encoding="utf-8")
+        self.info.with_suffix(".json.tmp").write_text(
+            json.dumps({"epoch": epoch + 1, "epochs": EPOCHS}), encoding="utf-8")
+        self.info.with_suffix(".json.tmp").replace(self.info)   # a stop mid-write keeps the last
 
 
 def main() -> None:
@@ -286,7 +300,8 @@ def main() -> None:
     train_model = keras.Model(raw, model(head), name="training_model")
     deploy_model = keras.Model(raw, model(normalize(raw)), name="mnist_mlp_deploy")
     optimizer = keras.optimizers.Adam(learning_rate=0.001, beta_1=0.9, beta_2=0.999, epsilon=1e-08)
-    train_model.compile(optimizer=optimizer, loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True))
+    train_model.compile(optimizer=optimizer, loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True), jit_compile=COMPILE)
+    optimizer = train_model.optimizer   # mixed_float16 wraps it in a LossScaleOptimizer
     callbacks = [EpochReport(x_val, y_val)]
     if EARLY_STOP:
         callbacks.append(keras.callbacks.EarlyStopping(
@@ -298,9 +313,33 @@ def main() -> None:
     callbacks.extend(CALLBACKS)
     if saver:
         callbacks.append(saver)
-    train_model.fit(x_train, fit_y, validation_data=(x_val, val_y) if len(x_val) else None,
-                    epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=callbacks, verbose=0,
-                    initial_epoch=first_epoch)
+    finished, started = [], None
+    if COMPILE:   # the state to go back to if compiling fails
+        started = (train_model.get_weights(), [np.array(v) for v in optimizer.variables],
+                   random_state(train_model))
+        callbacks.append(keras.callbacks.LambdaCallback(
+            on_epoch_end=lambda e, logs: finished.append(e)))
+        print("compiling with jit_compile", flush=True)
+    while True:
+        try:
+            train_model.fit(x_train, fit_y, validation_data=(x_val, val_y) if len(x_val) else None,
+                            epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=callbacks, verbose=0,
+                            initial_epoch=first_epoch)
+            break
+        except Exception as exc:  # noqa: BLE001 — a model jit_compile can't take trains without
+            if not train_model.jit_compile or finished:
+                raise
+            print(f"jit_compile did not work ({type(exc).__name__}: {str(exc)[:200]}): "
+                  "training without", flush=True)
+            weights, slots, randomness = started
+            train_model.set_weights(weights)
+            set_random_state(train_model, randomness)   # dropout draws as if never compiled
+            if slots and len(slots) == len(optimizer.variables):   # resumed: its own state
+                for variable, value in zip(optimizer.variables, slots, strict=True):
+                    variable.assign(value)
+            elif optimizer.variables:   # built by the failed attempt: start it afresh
+                optimizer = keras.optimizers.Adam(learning_rate=0.001, beta_1=0.9, beta_2=0.999, epsilon=1e-08)
+            train_model.compile(optimizer=optimizer, loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True), jit_compile=False)
     deploy_model.save(MODEL_FILE)
     save_inference_state()
     try:  # inputs for int8 calibration and export checks (about 4 MB at most)

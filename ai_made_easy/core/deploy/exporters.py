@@ -38,6 +38,8 @@ import numpy as np
 FLOAT_TOL = 1e-4
 HALF_TOL = 5e-2             # Core ML programs compute in float16 by default: deep networks
                             # (a small GPT, a diffusion U-Net) drift 2-3% of their output scale
+ARM_TOL = 1e-3              # OpenVINO on ARM CPUs: its kernels drift up to ~7e-4 even in
+                            # float32 and its accuracy mode (N-HiTS, Mamba-2)
 CLASS_TOL = 2e-3            # per-pixel outputs: or every class agrees and drift stays below
 DETECTION_MATCH = 0.9       # float detector exports: share of detections that must match
 INT8_FORMATS = ("onnx_int8", "executorch_int8", "litert_int8")
@@ -64,6 +66,21 @@ _MAX_CASES = 16          # inputs every export is checked on
 _MAX_CALIBRATION = 64    # inputs int8 calibration sees
 _MAX_EVAL = 256          # labelled inputs for the accuracy comparison
 
+
+
+def _arm() -> bool:
+    import platform
+
+    return platform.machine().lower() in ("arm64", "aarch64")
+
+
+def _tolerance(fmt: str) -> float:
+    """How close an export must come to the framework's own outputs."""
+    if fmt == "coreml":
+        return HALF_TOL
+    if fmt == "openvino" and _arm():
+        return ARM_TOL
+    return FLOAT_TOL
 
 class Skipped(Exception):
     """The format does not apply to this model; the message says why."""
@@ -463,7 +480,7 @@ class Exporter:
         return compare(self.kind, int8, self.refs(), outs, labels=labels,
                        eval_refs=self.eval_refs() if eval_outs else None, eval_outs=eval_outs,
                        source=_SOURCE.get(self.framework, self.framework),
-                       tol=HALF_TOL if fmt == "coreml" else FLOAT_TOL)
+                       tol=_tolerance(fmt))
 
     # ------------------------------------------------------------ PyTorch
     def _torch_table(self) -> dict:
@@ -611,14 +628,17 @@ class Exporter:
             converted = ov.convert_model(self.model, example_input=example[0]
                                          if len(example) == 1 else example)
         ov.save_model(converted, str(folder / "model.xml"), compress_to_fp16=False)
-        # float32 (ARM CPUs would compute in float16 by default)
+        # float32 (ARM CPUs would compute in float16 by default), without faster but less
+        # exact kernels
         compiled = ov.Core().compile_model(str(folder / "model.xml"), "CPU",
-                                           {"INFERENCE_PRECISION_HINT": "f32"})
+                                           {"INFERENCE_PRECISION_HINT": "f32",
+                                            "EXECUTION_MODE_HINT": "ACCURACY"})
 
         def run(case: tuple) -> np.ndarray:
             return np.asarray(compiled([np.ascontiguousarray(a) for a in case])[0])
 
         return folder, run, "float32, on this computer's CPU" + (
+            f" (an ARM CPU: within {ARM_TOL:g})" if _arm() else "") + (
             "; batch size 1 (the model fixes its batch size)" if batch == 1 else "")
 
     def executorch(self, int8: bool) -> tuple:

@@ -119,7 +119,8 @@ class Retention(nn.Module):
         decay = torch.where(gap >= 0, self.gamma.to(x.dtype)[:, None, None] ** gap.clamp(min=0),
                             torch.zeros((), device=x.device, dtype=x.dtype))
         y = (q @ k.transpose(-1, -2) * hd ** -0.5 * decay) @ v
-        y = self.norm(y.transpose(1, 2).reshape(b * n, d)).reshape(b, n, d)
+        # a trailing axis of 1: the same group norm, in a shape OpenVINO can run
+        y = self.norm(y.transpose(1, 2).reshape(b * n, d, 1)).reshape(b, n, d)
         return self.out(nn.functional.silu(self.gate(x)) * y)
 ''',
     "RWKVBlock": '''\

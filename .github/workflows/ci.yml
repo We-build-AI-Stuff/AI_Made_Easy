@@ -252,7 +252,8 @@ jobs:
 
   test-coreml:
     # 3.9: Core ML on macOS, where the converted programs run: every sample and the 3.7 /
-    # 3.8 layers match PyTorch within float16 tolerance, or an export rule says why not
+    # 3.8 layers match PyTorch within float16 tolerance, or an export rule says why not.
+    # 3.11: OpenVINO on Apple silicon too (ARM CPUs, within exporters.ARM_TOL)
     needs: lint
     runs-on: macos-latest
     timeout-minutes: 60
@@ -270,9 +271,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch torchvision
-          pip install -e ".[dev,export,coreml]"
+          pip install -e ".[dev,export,coreml,openvino]"
       - name: Core ML exports run and match PyTorch
         run: pytest -q -p no:cacheprovider tests/test_coreml.py tests/test_export.py -k "coreml or core_ml"
+      - name: OpenVINO exports run and match PyTorch on ARM
+        run: pytest -q -p no:cacheprovider tests/test_openvino.py tests/test_export.py -k "openvino"
 
   test-openvino:
     # 3.10: OpenVINO on x86 Linux: every sample and the 3.7 / 3.8 layers run on the CPU

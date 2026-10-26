@@ -24,6 +24,7 @@ def test_train_runs_a_pipeline(isolated_home, ctx, app):  # noqa: F811
     while not ctx.validation_store.valid and time.time() < deadline:
         app.processEvents()
         time.sleep(0.05)
+    assert ctx.validation_store.valid, "the design never validated"
     ctx.act_train()
     service = ctx.experiment_service
     assert service.pipeline is not None
@@ -52,6 +53,7 @@ def test_expand_shows_a_stage_design_inline(isolated_home, ctx, app):  # noqa: F
     while ctx._last_ir is None and time.time() < deadline:
         app.processEvents()
         time.sleep(0.05)
+    assert ctx._last_ir is not None, "the canvas never settled"
     adapter = ctx.graph_service.adapter
     node = adapter.nodes_of_type("pipeline.train")[0]      # the canvas has its own ids
     before = node.view.boundingRect().height()

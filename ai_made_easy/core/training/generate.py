@@ -241,10 +241,6 @@ def _torch_ctx(graph: Graph, spec: TrainingSpec) -> dict:
     if ctx["ema"] and ctx["swa"]:
         raise CodegenError("use one kind of weight averaging on the Trainer: EMA or SWA")
     ctx["gpus"] = int(spec.trainer.get("gpus") or 1)
-    if ctx["gpus"] > 1 and (spec.kfold or spec.metric_loss):
-        spec.warnings.append("several GPUs train networks without k-fold cross-validation "
-                             "or a metric-learning loss: this one trains on one")
-        ctx["gpus"] = 1
     for kind in (spec.optimizer["kind"], spec.loss["kind"]):
         helper = cat.COMPONENTS[kind].meta.get("torch_helper")
         if helper:
@@ -323,7 +319,6 @@ def _keras_ctx(graph: Graph, spec: TrainingSpec) -> dict:
     if int(spec.trainer.get("swa_start") or 0):
         unsupported.append("SWA weight averaging (use EMA in Keras)")
     torch_only = [label for label, used in (
-        ("compiling", bool(spec.trainer.get("compile"))),
         ("gradient checkpointing", bool(spec.trainer.get("gradient_checkpointing"))),
         ("several GPUs", int(spec.trainer.get("gpus") or 1) > 1)) if used]
     if torch_only:
