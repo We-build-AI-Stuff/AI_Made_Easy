@@ -75,8 +75,8 @@ pip install tensorflow                  # Keras -> LiteRT
 - **OpenVINO** (PyTorch, the `openvino` extra): Intel's runtime for its CPUs, GPUs and
   NPUs. The export is a folder `model.openvino/` with `model.xml` and its weights
   `model.bin`, takes any batch size and is checked against PyTorch on this computer's
-  CPU in float32 (within 1e-4, or 1e-3 on ARM CPUs such as Apple silicon, where a few
-  kernels drift slightly). Models with one input tensor; OpenVINO also reads the ONNX
+  CPU in float32 (within 1e-4 of the output scale; within 1e-2 on ARM CPUs such as
+  Apple silicon, where its kernels drift, up to 5e-3 over Mamba-2's scan). Models with one input tensor; OpenVINO also reads the ONNX
   export.
 
 ## GGUF: language models for llama.cpp, Ollama and LM Studio
