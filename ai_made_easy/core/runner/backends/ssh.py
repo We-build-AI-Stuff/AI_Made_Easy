@@ -191,7 +191,7 @@ class SSHBackend(RemoteBackend):
         # a resumed run reuses the folder: its last attempt's events and exit code go first,
         # or the follower (started right after) could replay them before the launcher runs.
         # Not "cd && nohup … &": that backgrounds a subshell that keeps ssh's output open
-        return (f"cd {d} || exit 1; rm -f {' '.join(STALE)}; "
+        return (f"cd {d} || exit 1; rm -f {' '.join(STALE)} || exit 1; "
                 f"nohup {inner} > launch.log 2>&1 < /dev/null & echo started")
 
     def launch(self, run: TrainingRun, python: str) -> None:
