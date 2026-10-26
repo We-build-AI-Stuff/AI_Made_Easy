@@ -868,3 +868,40 @@ def test_a_run_stopped_while_saving_still_resumes(tmp_path, framework):
     cut = _run(tmp_path, _script(_resumable_design(), tmp_path, framework), _CUT_SHORT)
     assert cut.returncode != 0 and "stopped while saving" in cut.stderr, cut.stderr[-2000:]
     assert json.loads((tmp_path / "resume.json").read_text(encoding="utf-8"))["epoch"] == 2
+
+
+_STOP_BETWEEN = ("import os, pathlib, signal\n"
+                 "real = pathlib.Path.replace\n"
+                 "saved = []\n"
+                 "def replace(self, target):\n"
+                 "    if pathlib.Path(target).name in ('resume.pt', 'resume.weights.h5'):\n"
+                 "        saved.append(1)\n"
+                 "        if len(saved) == 3:\n"
+                 "            os.kill(os.getpid(), signal.SIGTERM)   # a stop between the files\n"
+                 "    return real(self, target)\n"
+                 "pathlib.Path.replace = replace")
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform == "win32", reason="a stop there can't be held (TerminateProcess)")
+@pytest.mark.parametrize("framework", ["pytorch", "keras"])
+def test_a_stop_between_the_saved_files_waits_for_the_last(tmp_path, framework):
+    """The saved state and resume.json describe the same epoch: a stop that arrives
+    between them waits until both are in place, so the app says the epoch the run resumes
+    after."""
+    import pickle
+
+    from test_v39_features import _resumable_design
+
+    if framework == "keras":
+        keras = pytest.importorskip("keras")
+        if keras.backend.backend() != "torch":
+            pytest.skip("checked on the torch backend")
+    torch = pytest.importorskip("torch")
+    stopped = _run(tmp_path, _script(_resumable_design(), tmp_path, framework), _STOP_BETWEEN)
+    assert stopped.returncode == -15, stopped.stderr[-2000:]       # stopped, by the SIGTERM
+    assert json.loads((tmp_path / "resume.json").read_text(encoding="utf-8"))["epoch"] == 3
+    if framework == "pytorch":
+        assert torch.load(tmp_path / "resume.pt", weights_only=False)["epoch"] == 3
+    else:
+        assert pickle.loads((tmp_path / "resume.extra.pkl").read_bytes())["epoch"] == 3
