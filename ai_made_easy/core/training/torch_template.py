@@ -348,6 +348,27 @@ class GeneratorState:
         self.generator.set_state(state.cpu())
 
 
+def replace_together(moves: list) -> None:
+    """Move written files into place one after another, holding a stop (SIGTERM, Ctrl+C)
+    until the last: together they describe one epoch, and a stop between two would leave
+    the app and the resumed script disagreeing about which."""
+    import signal
+    import threading
+
+    held = []
+    caught = (signal.SIGTERM, signal.SIGINT)
+    here = threading.current_thread() is threading.main_thread()   # where handlers can go
+    before = {s: signal.signal(s, lambda n, _f: held.append(n)) for s in caught} if here else {}
+    try:
+        for tmp, final in moves:
+            Path(tmp).replace(final)
+    finally:
+        for s, handler in before.items():
+            signal.signal(s, handler if handler is not None else signal.SIG_DFL)
+        if held:
+            signal.raise_signal(held[0])   # the stop, now that the files agree
+
+
 def save_resume(epoch: int, objects: dict, best: tuple) -> None:
     """The model, optimizer and the rest after ``epoch``, written atomically."""
     state = {name: obj.state_dict() for name, obj in objects.items()}
@@ -357,11 +378,10 @@ def save_resume(epoch: int, objects: dict, best: tuple) -> None:
         "mps": torch.mps.get_rng_state() if torch.backends.mps.is_available() else None})
     tmp = Path(RESUME_FILE + ".tmp")
     torch.save(state, tmp)
-    tmp.replace(RESUME_FILE)
     info = Path(RESUME_FILE).with_suffix(".json")   # read by the app, without torch
     info.with_suffix(".json.tmp").write_text(json.dumps({"epoch": epoch, "epochs": EPOCHS}),
                                              encoding="utf-8")
-    info.with_suffix(".json.tmp").replace(info)   # a stop mid-write leaves the last one whole
+    replace_together([(tmp, RESUME_FILE), (info.with_suffix(".json.tmp"), info)])
 
 
 def load_resume(objects: dict, device) -> tuple[int, tuple]:  # noqa: ANN001
@@ -441,8 +461,9 @@ def train_together(gpus: int) -> None:
     DistributedDataParallel. This process trains as the first one, which reports and
     saves; the others are forked (spawned on Windows, which can't fork) and only train."""
     import json
-    import socket
+    import shutil
     import subprocess
+    import tempfile
 
     import torch.multiprocessing as mp
 
@@ -461,9 +482,11 @@ def train_together(gpus: int) -> None:
         globals()["GPUS"] = 1
         main()
         return
-    with socket.socket() as probe:   # a free port for the processes to meet on
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    # the processes meet through a file: a free port can be taken before they bind it, and
+    # connecting to it was slow on macOS (minutes) and can ask for a firewall rule on Windows
+    folder = tempfile.mkdtemp(prefix="aime-ddp-")
+    path = Path(folder, "meet").resolve().as_posix()
+    meet = "file://" + ("" if path.startswith("/") else "/") + path
 
     def plain(value) -> bool:  # noqa: ANN001
         try:
@@ -483,23 +506,26 @@ def train_together(gpus: int) -> None:
     print(f"training on {count} {'CPU processes' if DEVICE == 'cpu' else 'GPUs'} ({how})",
           flush=True)
     sys.stdout.flush()
-    others = mp.start_processes(_one_of_many, args=(count, port, settings), nprocs=count - 1,
+    others = mp.start_processes(_one_of_many, args=(count, meet, settings), nprocs=count - 1,
                                 join=False, start_method=START_METHOD)
     done = threading.Event()
-    threading.Thread(target=_watch, args=(others.processes, done), daemon=True).start()
+    threading.Thread(target=_watch, args=(others.processes, done, folder), daemon=True).start()
 
     def stop_others() -> None:   # they would wait for this one until the backend times out
         done.set()
         _stop(others.processes)
 
     try:
-        _train_as(0, count, port, stop_others)
-    except BaseException:
-        stop_others()
-        raise
-    done.set()
-    while not others.join():
-        pass
+        try:
+            _train_as(0, count, meet, stop_others)
+        except BaseException:
+            stop_others()
+            raise
+        done.set()
+        while not others.join():
+            pass
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _stop(processes: list) -> None:
@@ -508,7 +534,7 @@ def _stop(processes: list) -> None:
             process.terminate()
 
 
-def _watch(processes: list, done: threading.Event) -> None:
+def _watch(processes: list, done: threading.Event, folder: str = "") -> None:
     """While this process trains, notice another one failing: this one would wait for it
     in the next exchange until the backend times out."""
     import os
@@ -519,22 +545,26 @@ def _watch(processes: list, done: threading.Event) -> None:
             print(f"a training process stopped (exit code {failed.exitcode}): stopping the "
                   "run", flush=True)
             _stop(processes)
+            if folder:   # os._exit skips the cleanup
+                import shutil
+
+                shutil.rmtree(folder, ignore_errors=True)
             os._exit(1)
 
 
 START_METHOD = "spawn" if sys.platform == "win32" else "fork"
 
 
-def _one_of_many(index: int, world: int, port: int, settings: dict) -> None:
+def _one_of_many(index: int, world: int, meet: str, settings: dict) -> None:
     """Process ``index + 1`` of ``world``: trains its share, reports nothing."""
     import os
 
     globals().update(settings)
     sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
-    _train_as(index + 1, world, port)
+    _train_as(index + 1, world, meet)
 
 
-def _train_as(rank: int, world: int, port: int, on_failure=None) -> None:  # noqa: ANN001
+def _train_as(rank: int, world: int, meet: str, on_failure=None) -> None:  # noqa: ANN001
     import torch.distributed as dist
 
     global RANK, WORLD
@@ -543,8 +573,7 @@ def _train_as(rank: int, world: int, port: int, on_failure=None) -> None:  # noq
     if gpu:
         torch.cuda.set_device(rank)
     backend = "nccl" if gpu and sys.platform != "win32" else "gloo"   # no NCCL on Windows
-    dist.init_process_group(backend, init_method=f"tcp://127.0.0.1:{port}", rank=rank,
-                            world_size=world)
+    dist.init_process_group(backend, init_method=meet, rank=rank, world_size=world)
     try:
         main()
     except BaseException:

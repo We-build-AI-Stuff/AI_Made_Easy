@@ -224,6 +224,27 @@ def set_random_state(model: keras.Model, state: dict, layers: bool = True) -> No
             generator.state.assign(value)
 
 
+def replace_together(moves: list) -> None:
+    """Move written files into place one after another, holding a stop (SIGTERM, Ctrl+C)
+    until the last: together they describe one epoch, and a stop between two would leave
+    the app and the resumed script disagreeing about which."""
+    import signal
+    import threading
+
+    held = []
+    caught = (signal.SIGTERM, signal.SIGINT)
+    here = threading.current_thread() is threading.main_thread()   # where handlers can go
+    before = {s: signal.signal(s, lambda n, _f: held.append(n)) for s in caught} if here else {}
+    try:
+        for tmp, final in moves:
+            Path(tmp).replace(final)
+    finally:
+        for s, handler in before.items():
+            signal.signal(s, handler if handler is not None else signal.SIG_DFL)
+        if held:
+            signal.raise_signal(held[0])   # the stop, now that the files agree
+
+
 class SaveResume(keras.callbacks.Callback):
     """After each epoch, what training needs to continue: the weights and optimizer
     (RESUME_FILE), the random state and the other callbacks' counters (early stopping,
@@ -273,11 +294,10 @@ class SaveResume(keras.callbacks.Callback):
                                for c in self.callbacks]}
         with open(self.extra.with_suffix(".tmp"), "wb") as fh:
             pickle.dump(state, fh)
-        tmp.replace(self.weights)
-        self.extra.with_suffix(".tmp").replace(self.extra)
         self.info.with_suffix(".json.tmp").write_text(
             json.dumps({"epoch": epoch + 1, "epochs": EPOCHS}), encoding="utf-8")
-        self.info.with_suffix(".json.tmp").replace(self.info)   # a stop mid-write keeps the last
+        replace_together([(tmp, self.weights), (self.extra.with_suffix(".tmp"), self.extra),
+                          (self.info.with_suffix(".json.tmp"), self.info)])
 
 
 def main() -> None:
