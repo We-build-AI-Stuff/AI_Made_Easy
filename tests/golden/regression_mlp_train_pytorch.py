@@ -600,8 +600,13 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
     amp_dtype = (torch.bfloat16 if PRECISION == "bfloat16"
                  or (PRECISION == "auto" and device.type != "cuda") else torch.float16)
     # float16 needs its loss scaled so small gradients don't vanish; bfloat16 doesn't
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda"
-                                  and amp_dtype == torch.float16)
+    scaling = use_amp and device.type == "cuda" and amp_dtype == torch.float16
+    if WORLD > 1 and SHARDED:   # each process sees its gradients' shard: agree on skipping
+        from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+
+        scaler = ShardedGradScaler("cuda", enabled=scaling)
+    else:
+        scaler = torch.amp.GradScaler("cuda", enabled=scaling)
     net = model   # what the training steps call
     if WORLD > 1 and not SHARDED:
         net = nn.parallel.DistributedDataParallel(

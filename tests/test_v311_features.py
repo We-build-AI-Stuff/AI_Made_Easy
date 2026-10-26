@@ -246,7 +246,9 @@ def test_bfloat16_needs_no_loss_scaling():
     source = generate_training(Graph.from_dict(_design(precision="bfloat16",
                                                        mixed_precision=True)), "pytorch")
     assert 'PRECISION = "bfloat16"' in source
-    assert "and amp_dtype == torch.float16)" in source        # the scaler only for float16
+    assert 'device.type == "cuda" and amp_dtype == torch.float16' in source   # float16 only
+    # sharded, each process holds a shard of the gradients: they agree on skipping a step
+    assert 'ShardedGradScaler("cuda", enabled=scaling)' in source
     plain = generate_training(Graph.from_dict(_design()), "pytorch")
     assert 'PRECISION = "auto"' in plain and "SHARDED = False" in plain
 
