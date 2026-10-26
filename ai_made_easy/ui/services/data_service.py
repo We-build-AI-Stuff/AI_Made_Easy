@@ -34,6 +34,7 @@ class DataService(QtCore.QObject):
         self._inflight: set = set()
         self._futures: list[Future] = []
         self._closed = False
+        self._emitting = threading.Lock()   # shutdown waits for an emit under way
 
     # ------------------------------------------------------------ profiles
     def issues_for(self, graph: Graph) -> list[ValidationIssue]:
@@ -63,7 +64,7 @@ class DataService(QtCore.QObject):
         def work():
             from ai_made_easy.core.data.profile import profile_path
 
-            self.profiled.emit(key, profile_path(path, target=target))
+            self._emit("profiled", key, profile_path(path, target=target))
 
         self._submit(work)
         return key
@@ -88,8 +89,8 @@ class DataService(QtCore.QObject):
             finally:
                 with self._lock:
                     self._inflight.discard(key)
-            self.profiled.emit(key, profile)
-            self.changed.emit()
+            self._emit("profiled", key, profile)
+            self._emit("changed")
 
         self._submit(work)
 
@@ -103,7 +104,7 @@ class DataService(QtCore.QObject):
                                    or guess_format(profile.source), nrows=limit)
             except Exception:  # noqa: BLE001 — the profile already reported it
                 frame = None
-            self.rows_ready.emit(key, frame)
+            self._emit("rows_ready", key, frame)
 
         self._submit(work)
 
@@ -118,9 +119,9 @@ class DataService(QtCore.QObject):
                 data = api.split_preview(graph, base=self.base)
                 preview = SplitPreview(totals=data["totals"], per_class=data["per_class"],
                                        method=data["method"], notes=data["notes"])
-                self.split_ready.emit(preview, "")
+                self._emit("split_ready", preview, "")
             except Exception as exc:  # noqa: BLE001 — shown in the page
-                self.split_ready.emit(None, str(exc))
+                self._emit("split_ready", None, str(exc))
 
         self._submit(work)
 
@@ -133,9 +134,9 @@ class DataService(QtCore.QObject):
             try:
                 result = augmentation_preview(graph, out, base=self.base, python=self.python,
                                               images=images, variants=variants)
-                self.preview_ready.emit(result, "")
+                self._emit("preview_ready", result, "")
             except Exception as exc:  # noqa: BLE001 — shown in the page
-                self.preview_ready.emit(None, str(exc))
+                self._emit("preview_ready", None, str(exc))
 
         self._submit(work)
 
@@ -159,7 +160,15 @@ class DataService(QtCore.QObject):
             time.sleep(0.01)
         QtCore.QCoreApplication.processEvents()
 
+    def _emit(self, signal: str, *args) -> None:  # noqa: ANN002
+        """Emit from a worker thread, unless the service has shut down: the window may
+        delete it then, and emitting on a deleted object crashes."""
+        with self._emitting:
+            if not self._closed:
+                getattr(self, signal).emit(*args)
+
     def shutdown(self) -> None:
-        self._closed = True
+        with self._emitting:   # after this, no work still running emits
+            self._closed = True
         self._pool.shutdown(wait=False, cancel_futures=True)
 
