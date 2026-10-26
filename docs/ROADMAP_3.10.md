@@ -55,8 +55,8 @@
   current. **Done.**
 
 ## Phase 4 — release 3.10.0 (#79)
-- CHANGELOG, README, this roadmap, a fairness screenshot, version 3.10.0. The tag and
-  release follow your confirmation.
+- CHANGELOG, README, this roadmap, a fairness screenshot, version 3.10.0. Tagged and
+  released as v3.10.0. **Done.**
 
 ## Still open
 - Making the Windows test jobs required checks is your call (a ruleset change).

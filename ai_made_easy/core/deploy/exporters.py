@@ -39,8 +39,9 @@ import numpy as np
 FLOAT_TOL = 1e-4
 HALF_TOL = 5e-2             # Core ML programs compute in float16 by default: deep networks
                             # (a small GPT, a diffusion U-Net) drift 2-3% of their output scale
-ARM_TOL = 1e-3              # OpenVINO on ARM CPUs: its kernels drift up to ~7e-4 even in
-                            # float32 and its accuracy mode (N-HiTS, Mamba-2)
+ARM_TOL = 1e-2              # OpenVINO on ARM CPUs: its kernels drift even in float32 and
+                            # its accuracy mode; over Mamba-2's scan, up to 5.3e-3 of the
+                            # output scale (200 random initialisations; most stay below 1e-3)
 CLASS_TOL = 2e-3            # per-pixel outputs: or every class agrees and drift stays below
 DETECTION_MATCH = 0.9       # float detector exports: share of detections that must match
 INT8_FORMATS = ("onnx_int8", "executorch_int8", "litert_int8")
