@@ -385,7 +385,9 @@ def test_atari_rom_and_package_rules(monkeypatch):
                         lambda name, *a: None if name == "ale_py" else real(name, *a))
     assert any("pip install 'ai-made-easy[atari]'" in m
                for m in _messages(_rl("rl_atari_pong_ppo")))
-    monkeypatch.setattr(rules.importlib.util, "find_spec", real)
+    # ale-py there (whether or not this machine has it), but without the game's ROM
+    monkeypatch.setattr(rules.importlib.util, "find_spec",
+                        lambda name, *a: object() if name == "ale_py" else real(name, *a))
     monkeypatch.setattr(rules, "_rom_missing", lambda rom: True)
     assert any("the pong ROM is missing" in m and "never ships ROMs" in m
                for m in _errors(_rl("rl_atari_pong_ppo")))
