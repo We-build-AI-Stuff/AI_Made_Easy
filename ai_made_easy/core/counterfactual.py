@@ -229,6 +229,8 @@ def what_would_change(service, history, run_id: str, row: dict, *,  # noqa: ANN0
     missing = [c for c in names if c not in row]
     if missing:
         raise CounterfactualError(f"the row is missing {missing}")
+    if isinstance(locked, (str, bytes)) or not all(isinstance(c, str) for c in locked):
+        raise CounterfactualError("locked must be a list of column names")
     unknown = [c for c in locked if c not in names]
     if unknown:
         raise CounterfactualError(f"no such column to lock: {unknown}")

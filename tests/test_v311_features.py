@@ -789,6 +789,9 @@ def test_a_trained_network_says_what_would_change_its_prediction(isolated_home, 
         bad = TestClient(create_app()).post(f"/api/runs/{run_id}/counterfactuals",
                                             json={"row": row, "target": [1, 2]})
         assert bad.status_code == 400 and "target must be a number" in bad.text
+        bad = TestClient(create_app()).post(f"/api/runs/{run_id}/counterfactuals",
+                                            json={"row": row, "locked": "a"})   # not a list
+        assert bad.status_code == 400 and "locked must be a list of column names" in bad.text
         _desktop_finds_changes(mgr, run_id)
     finally:
         api.try_service().close()
