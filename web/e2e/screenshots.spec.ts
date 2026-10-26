@@ -310,6 +310,7 @@ test("docs screenshots: 3.11 a threshold per group, and what would change it", a
   await expect(panel).toBeVisible({ timeout: 60_000 });
   await panel.getByTestId("cf-search").click();
   await expect(panel.getByTestId("cf-results")).toContainText("Goal: predicted 1 (now 0)", { timeout: 60_000 });
+  await expect(panel.getByTestId("cf-results")).toContainText("One change is enough");   // found one
   await panel.scrollIntoViewIfNeeded();
   await panel.screenshot({ path: `${OUT}/web_what_would_change.png` });
 });
