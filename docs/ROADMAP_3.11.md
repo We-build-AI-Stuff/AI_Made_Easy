@@ -95,6 +95,16 @@
   called the original layers. The wrapper is now bound to its own layer.
 - **A Keras compile retry restores the random state too**, so dropout draws as if the
   run had never compiled.
+- **A run stopped while it saved resumes.** A fast run writes its resume files many times
+  a second. A stop could cut `resume.json` short, or land between it and the saved state,
+  so the app said "nothing to resume" or the wrong epoch. Both are now written first,
+  then moved into place together, with the stop held until the last. CI's web test
+  caught it.
+- **Closing the desktop app while a data profile ran could crash it.** The profile's
+  thread signalled the deleted window; it no longer signals once the app has begun to
+  close.
+- **Several processes meet through a file**, not a TCP port. On CI's macOS runners the
+  second process took over two minutes to connect.
 
 ## Still open
 - Making the Windows test jobs required checks is your call (a ruleset change).

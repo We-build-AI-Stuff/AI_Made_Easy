@@ -43,6 +43,12 @@ this release.
 - With gradient checkpointing, EMA's and SWA's averaged models were scored with the
   live weights; copies of a checkpointed model now run their own layers.
 - The memory fix no longer offers sharding with EMA or SWA.
+- A run stopped while it saved could not resume. A stop could cut `resume.json` short, or
+  leave it one epoch behind the saved state. The files are now written first, then moved
+  into place together, with the stop held until the last.
+- Closing the desktop app while a data profile was still running could crash it.
+- Several processes on one machine meet through a file instead of a TCP port. Connecting
+  could take minutes on macOS, and needed a free port.
 
 ## 3.10.0
 
