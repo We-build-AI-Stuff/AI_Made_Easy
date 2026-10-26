@@ -265,8 +265,10 @@ if todo:
             print(f"{{fmt}}: skipped: {{exc}}")
     if data is not None:
         print(f"checking exports on {{len(data.cases)}} {{data.source}}")
+        st = getattr(model_def, "STATE", None)
+        merges = st.get("bpe_merges") if isinstance(st, dict) else None
         report["formats"].update(exporters.export_all(model, FRAMEWORK, todo, HERE / "exports",
-                                                      data))
+                                                      data, merges=merges))
 for entry in report["formats"].values():
     if entry.get("file"):
         entry["file"] = os.path.relpath(entry["file"], HERE) if os.path.isabs(entry["file"]) \

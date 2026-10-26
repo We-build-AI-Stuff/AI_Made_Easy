@@ -10,6 +10,12 @@ flows through this numpy code.
 DATA_TEMPLATE = r'''
 # ================================================================== data
 INFERENCE_STATE: dict = {}  # fitted preprocessing, saved with the model for serving
+{% if balance == "group weights" %}
+GROUP_VALUES = TRAIN_GROUPS = None   # the group column, for every row and the training rows
+
+
+{{ group_weights_code }}
+{% endif %}
 
 
 {% if d.block in ("data.csv", "data.text_csv", "data.timeseries_csv", "data.pairs", "data.triplets") %}
@@ -110,6 +116,10 @@ def load_raw():
     if target not in frame.columns:
         raise SystemExit(f"target column {target!r} not found; columns: {list(frame.columns)}")
     y = frame.pop(target)
+{% if balance == "group weights" %}
+    global GROUP_VALUES
+    GROUP_VALUES = group_column(frame, {{ group_column | repr }})
+{% endif %}
 {% if feature_columns %}
     frame = frame[{{ feature_columns | repr }}]
 {% endif %}
@@ -618,6 +628,14 @@ def make_arrays() -> dict[str, tuple[np.ndarray, np.ndarray]]:
     x, y = x[keep].reset_index(drop=True), np.asarray(y)[keep]
 {% endif %}
     train_i, val_i, test_i = split_indices(len(y), y)
+{% if balance == "group weights" %}
+    global TRAIN_GROUPS
+{% if table_steps and steps["prep.impute"] and steps["prep.impute"].strategy == "drop rows" %}
+    TRAIN_GROUPS = GROUP_VALUES[keep][train_i]
+{% else %}
+    TRAIN_GROUPS = GROUP_VALUES[train_i]
+{% endif %}
+{% endif %}
     parts = {"train": train_i, "val": val_i, "test": test_i}
 {% if table_steps %}
     train_x, val_x, test_x = preprocess_tables(
@@ -753,3 +771,25 @@ def inverse_targets(values: np.ndarray) -> np.ndarray:
     return flat.reshape(values.shape)
 {% endif %}
 '''
+
+
+GROUP_WEIGHTS = r'''def group_column(frame, name: str) -> np.ndarray:
+    """The group of each row, as text (missing values are a group of their own)."""
+    if name not in frame.columns:
+        raise SystemExit(f"group column {name!r} not found; columns: {list(frame.columns)}")
+    return frame[name].astype(str).where(frame[name].notna(), "(missing)").to_numpy()
+
+
+def group_weights(groups, labels) -> np.ndarray:
+    """Reweighing (Kamiran & Calders): a row of group g and class c weighs
+    P(g) P(c) / P(g, c), so in the weighted rows every group has each class as often as
+    the data overall, and the group says nothing about the class."""
+    groups, labels = np.asarray(groups), np.asarray(labels).reshape(-1)
+    weights = np.ones(len(labels))
+    for g in np.unique(groups):
+        in_group = groups == g
+        for c in np.unique(labels):
+            both = in_group & (labels == c)
+            if both.any():
+                weights[both] = in_group.mean() * (labels == c).mean() / both.mean()
+    return weights'''

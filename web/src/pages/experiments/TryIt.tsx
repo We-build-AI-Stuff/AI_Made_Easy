@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 
 import { api } from "../../api";
 import { Modal } from "../../components/Modal";
-import type { RunRecord, TryForm } from "../../types";
+import type { Counterfactual, Counterfactuals, RunRecord, TryForm } from "../../types";
 
 type Prediction = Record<string, unknown>;
 
@@ -70,6 +70,7 @@ export function TryModal({ run, onClose }: { run: RunRecord; onClose: () => void
   const [json, setJson] = useState("");
   const [file, setFile] = useState<{ name: string; url: string } | null>(null);
   const [result, setResult] = useState<{ predictions: Prediction[]; latency_ms: number } | null>(null);
+  const [asked, setAsked] = useState<Record<string, unknown> | null>(null);   // the row predicted
   const [explain, setExplain] = useState(false);
   const [batch, setBatch] = useState<{ name: string; url: string; rows: number } | null>(null);
 
@@ -96,10 +97,13 @@ export function TryModal({ run, onClose }: { run: RunRecord; onClose: () => void
     setBusy(true);
     setError("");
     try {
-      setResult(await api.tryRun(run.run_id, inputs(), explain && !!form?.can_explain));
+      const sent = inputs();
+      setResult(await api.tryRun(run.run_id, sent, explain && !!form?.can_explain));
+      setAsked(columns.length ? (sent[0] as Record<string, unknown>) : null);
     } catch (e) {
       setError(String((e as Error).message));
       setResult(null);
+      setAsked(null);
     } finally {
       setBusy(false);
     }
@@ -174,6 +178,93 @@ export function TryModal({ run, onClose }: { run: RunRecord; onClose: () => void
           {result.predictions.map((p, i) => <TryResult key={i} prediction={p} />)}
           <p className="muted">{result.latency_ms} ms</p>
         </div>)}
+      {result && asked && (   // keyed by the row: a new prediction starts a new search
+        <WhatWouldChange key={JSON.stringify(asked)} runId={run.run_id} row={asked}
+                         columns={columns} prediction={result.predictions[0]} />)}
     </Modal>
   );
+}
+
+const shown = (v: unknown) => (typeof v === "number" ? String(Math.round(v * 1e4) / 1e4) : String(v));
+
+function Change({ c }: { c: Counterfactual }) {
+  const p = c.prediction;
+  const probs = p.probabilities as Record<string, number> | undefined;
+  const label = p.label !== undefined ? String(p.label) : shown(p.prediction);
+  return (
+    <li>
+      {c.changes.map((ch, i) => (
+        <span key={ch.column}>{i > 0 && " and "}<b>{ch.column}</b> {shown(ch.from)} → {shown(ch.to)}</span>))}
+      <span className="muted"> · predicts {label}
+        {probs && p.label !== undefined && ` (${(probs[String(p.label)] * 100).toFixed(0)}%)`}</span>
+    </li>);
+}
+
+/** 3.11: the smallest edits to this row that change the model's answer. */
+function WhatWouldChange({ runId, row, columns, prediction }: {
+  runId: string; row: Record<string, unknown>; columns: string[]; prediction: Prediction }) {
+  const probs = prediction.probabilities as Record<string, number> | undefined;
+  const classes = probs ? Object.keys(probs).filter((c) => c !== String(prediction.label)) : [];
+  const [desired, setDesired] = useState("");
+  const [target, setTarget] = useState("");
+  const [locked, setLocked] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [found, setFound] = useState<Counterfactuals | null>(null);
+  if (!probs && typeof prediction.prediction !== "number") return null;
+  const search = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      setFound(await api.whatWouldChange(runId, {
+        row, locked, desired: probs ? desired || undefined : undefined,
+        target: probs ? undefined : Number(target) }));
+    } catch (e) {
+      setError(String((e as Error).message));
+      setFound(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="what-would-change" data-testid="what-would-change">
+      <h4>What would change it?</h4>
+      <p className="dim">The model is asked about edited copies of this row, with values your
+        training table has. It shows what the model does, not why.</p>
+      <div className="form">
+        {probs ? (
+          <div className="field"><label htmlFor="cf-desired">Make it predict</label>
+            <select id="cf-desired" value={desired} onChange={(e) => setDesired(e.target.value)}>
+              <option value="">{classes.length ? `${[...classes].sort((a, b) => probs[b] - probs[a])[0]} (the runner-up)` : "—"}</option>
+              {classes.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select></div>
+        ) : (
+          <div className="field"><label htmlFor="cf-target">Reach the value</label>
+            <input id="cf-target" type="number" value={target} onChange={(e) => setTarget(e.target.value)} /></div>
+        )}
+        <fieldset className="locks"><legend>Keep as they are</legend>
+          {columns.map((c) => (
+            <label key={c} className="check">
+              <input type="checkbox" checked={locked.includes(c)} data-testid={`cf-lock-${c}`}
+                     onChange={(e) => setLocked((l) => e.target.checked ? [...l, c] : l.filter((x) => x !== c))} />
+              {c}</label>))}
+        </fieldset>
+        <button onClick={search} disabled={busy || (!probs && target.trim() === "")}
+                data-testid="cf-search">{busy ? "Searching…" : "Find changes"}</button>
+      </div>
+      {error && <p className="error" role="alert">{error}</p>}
+      {found && (
+        <div data-testid="cf-results">
+          <p>Goal: {found.goal}.</p>
+          {found.single.length > 0 && (
+            <><p>One change is enough, smallest first:</p>
+              <ul>{found.single.map((c) => <Change key={c.changes[0].column} c={c} />)}</ul></>)}
+          {found.combined && (
+            <><p>No single change is enough; together these are:</p>
+              <ul><Change c={found.combined} /></ul></>)}
+          {!found.found && <p>No change of up to three columns reaches the goal with values from
+            the training table.</p>}
+          <p className="muted">{found.predictions_checked} edited rows checked.</p>
+        </div>)}
+    </section>);
 }

@@ -231,8 +231,13 @@ PREPROCESSING: list[DataBlock] = [
         desc="Batching and worker settings (PyTorch).", applies_to=frozenset(ALL)),
     DataBlock(
         "prep.class_balance", "Class Balancing", "Preprocessing",
-        (P("strategy", "enum", "class weights", options=("class weights", "oversample")),),
-        desc="Counter class imbalance with loss weights or a weighted sampler.",
+        (P("strategy", "enum", "class weights",
+           options=("class weights", "oversample", "group weights")),
+         P("group_column", "str", "",
+           help="group weights: the column (e.g. region) whose groups are weighted so "
+                "that each gets every class as often as the data overall")),
+        desc="Counter class imbalance with loss weights or a weighted sampler, or weight "
+             "rows so a group column says nothing about the class (group weights).",
         applies_to=frozenset(ALL)),
     # ---------------------------------------------------------- tabular
     DataBlock(

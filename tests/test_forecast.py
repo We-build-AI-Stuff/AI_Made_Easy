@@ -385,7 +385,7 @@ def test_timesnet_exports_to_executorch_float_and_int8(tmp_path):
     from ai_made_easy.core.deploy.exportability import blockers
 
     graph = Graph.from_dict(design("forecast.timesnet", {"d_model": 8, "hidden": 8}))
-    assert blockers(graph) == {}
+    assert set(blockers(graph)) == {"gguf"}          # GGUF holds Llama-style decoders only
     model, samples = _build(graph)
     report = ex.export_all(model, "pytorch", ["executorch", "executorch_int8"], tmp_path,
                            samples, log=lambda _m: None)

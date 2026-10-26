@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { api } from "../../api";
 import { metric, Modal } from "../../components/Modal";
 import { useStore } from "../../state";
-import type { GroupColumn, GroupResult, RunRecord } from "../../types";
+import type { GroupColumn, GroupResult, Mitigation, RunRecord } from "../../types";
 
 const FINAL = ["finished", "failed", "stopped", "interrupted"];
 
@@ -128,7 +128,42 @@ export function GroupsModal({ run, onClose }: { run: RunRecord; onClose: () => v
           {result.fairness && (
             <p data-testid="fairness"><b className={result.fairness.flagged.length ? "sev-warning" : ""}>
               Fairness:</b> {result.fairness.summary}</p>)}
+          {result.mitigation && <Thresholds m={result.mitigation} column={result.column ?? ""} />}
         </div>)}
     </Modal>
+  );
+}
+
+const pct = (v: number | null | undefined) => (typeof v === "number" ? `${(v * 100).toFixed(0)}%` : "—");
+
+/** A threshold per group: each group's rates at 0.5 and with its own threshold. */
+function Thresholds({ m, column }: { m: Mitigation; column: string }) {
+  const after = new Map(m.after.groups.map((g) => [g.value, g]));
+  return (
+    <div data-testid="thresholds">
+      <h4>A threshold per group</h4>
+      {m.summary && <p className={m.helps ? "" : "dim"}>{m.summary}</p>}
+      <table>
+        <thead><tr><th>{column}</th><th className="num">threshold</th>
+          <th className="num">true positives</th><th className="num">false positives</th>
+          <th className="num">accuracy</th></tr></thead>
+        <tbody>
+          {m.before.groups.map((g) => {
+            const a = after.get(g.value);
+            return (
+              <tr key={g.value}>
+                <td>{g.value}</td>
+                <td className="num">{(m.thresholds[g.value] ?? 0.5).toFixed(2)}</td>
+                <td className="num">{pct(g.rates.tpr[0])} → {pct(a?.rates.tpr[0])}</td>
+                <td className="num">{pct(g.rates.fpr[0])} → {pct(a?.rates.fpr[0])}</td>
+                <td className="num">{pct(g.accuracy)} → {pct(a?.accuracy)}</td>
+              </tr>);
+          })}
+        </tbody>
+      </table>
+      <p className="dim">Before → after, on {m.before.overall.count} rows the thresholds were
+        not fitted on. They are saved as group_thresholds.json in this scoring run: predict
+        the positive class when its probability reaches the row's group threshold.</p>
+    </div>
   );
 }

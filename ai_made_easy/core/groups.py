@@ -27,6 +27,7 @@ from pathlib import Path
 RESULT = "groups.json"
 MAX_GROUPS = 50
 QUARTILES_ABOVE = 20         # numeric columns with more distinct values are binned
+MIN_POSITIVES = 5            # positives a group needs (in the fitting rows) for its own threshold
 GAP = 0.10                   # relative gap that flags a group
 FAIR_GAP = 0.10              # absolute gap in a rate between groups that flags them
 _EXACT = 1e-9                # a gap of exactly FAIR_GAP counts, whatever the rounding
@@ -54,6 +55,7 @@ SOURCE = Path({source!r})
 COLUMN = {column!r}
 DATA, FORMAT = {path!r}, {fmt!r}
 MAX_GROUPS, QUARTILES_ABOVE = {max_groups!r}, {quartiles!r}
+MIN_POSITIVES = {min_positives!r}   # a group needs this many positives for its own threshold
 
 
 def load_module(path, name):
@@ -64,14 +66,16 @@ def load_module(path, name):
     return module
 
 
-def read_column(rows):
+def read_column(rows, other=None):
+    """The group of each row; with other rows too, both binned the same way."""
     readers = {{"csv": pd.read_csv, "tsv": lambda p: pd.read_csv(p, sep="\\t"),
                "parquet": pd.read_parquet, "excel": pd.read_excel,
                "json": lambda p: pd.read_json(p, lines=str(p).endswith(".jsonl"))}}
     frame = readers.get(FORMAT, pd.read_csv)(DATA)
     if COLUMN not in frame.columns:
         raise SystemExit(f"column {{COLUMN!r}} not found; columns: {{list(frame.columns)}}")
-    values = frame[COLUMN].iloc[rows] if rows is not None else frame[COLUMN]
+    picked = list(rows) + list(other if other is not None else [])
+    values = frame[COLUMN].iloc[picked]
     numeric = pd.api.types.is_numeric_dtype(values)
     if numeric and values.nunique() > QUARTILES_ABOVE:
         values = pd.qcut(values, 4, duplicates="drop").astype(str)
@@ -82,7 +86,10 @@ def read_column(rows):
     if values.nunique() > MAX_GROUPS:
         raise SystemExit(f"{{COLUMN!r}} has {{values.nunique()}} different values; pick a "
                          f"column with at most {{MAX_GROUPS}} (or a number, split into quartiles)")
-    return values.to_numpy(), how
+    values = values.to_numpy()
+    if other is not None:
+        return values[:len(rows)], values[len(rows):], how
+    return values, how
 
 
 def finite(values):
@@ -104,11 +111,71 @@ def rates(pred, truth, classes):
     return out
 
 
-def write(overall, groups, how, classes=None, overall_rates=None):
+def at(score, group, thresholds):
+    """Predictions with each group's threshold (0.5 for a group without one)."""
+    cut = np.array([thresholds.get(g, 0.5) for g in group]) if len(group) else np.zeros(0)
+    return (score >= cut).astype(int)
+
+
+def fit_thresholds(score, truth, group):
+    """Equal opportunity (Hardt et al.): every group's threshold gives it the same
+    true-positive rate, the rate that leaves the rows most accurate. Groups with few
+    positives keep 0.5."""
+    positive = truth == 1
+    own = {{}}
+    for g in sorted(set(group)):
+        mine = group == g
+        if (mine & positive).sum() < MIN_POSITIVES:
+            continue
+        cuts = np.unique(np.concatenate([score[mine], [0.5]]))
+        own[str(g)] = (cuts, np.array([(score[mine & positive] >= t).mean() for t in cuts]))
+    best, best_accuracy, best_target = {{}}, -1.0, None
+    for target in np.linspace(0.05, 1.0, 20):
+        thresholds = {{}}
+        for g, (cuts, tpr) in own.items():
+            pick = np.lexsort((np.abs(cuts - 0.5), np.abs(tpr - target)))[0]
+            thresholds[g] = float(cuts[pick])
+        accuracy = float((at(score, group, thresholds) == truth).mean())
+        if accuracy > best_accuracy + 1e-12:
+            best, best_accuracy, best_target = thresholds, accuracy, float(target)
+    return best, best_target
+
+
+def compare(score, truth, group, thresholds):
+    """Each group's rates and accuracy at 0.5 and with its own threshold."""
+    sides = {{}}
+    for side, used in (("before", {{}}), ("after", thresholds)):
+        pred = at(score, group, used)
+        sides[side] = {{
+            "overall": {{"count": int(len(truth)), "accuracy": float((pred == truth).mean())}},
+            "overall_rates": rates(pred, truth, [1]),
+            "groups": [{{"value": str(g), "count": int((group == g).sum()),
+                        "accuracy": float((pred[group == g] == truth[group == g]).mean()),
+                        "rates": rates(pred[group == g], truth[group == g], [1])}}
+                       for g in sorted(set(group))]}}
+    return sides
+
+
+def mitigate(fit, report, fitted_on):
+    """Per-group thresholds for a binary classifier: fitted on one set of rows, and the
+    groups' rates before and after on another."""
+    fit = [np.asarray(v) for v in fit]
+    report = [np.asarray(v) for v in report]
+    thresholds, target = fit_thresholds(*fit)
+    if not thresholds:
+        return None
+    Path("group_thresholds.json").write_text(json.dumps(
+        {{"column": COLUMN, "default": 0.5, "thresholds": thresholds}}, indent=1),
+        encoding="utf-8")
+    return {{"fitted_on": fitted_on, "target_tpr": target, "thresholds": thresholds,
+            **compare(*report, thresholds)}}
+
+
+def write(overall, groups, how, classes=None, overall_rates=None, mitigation=None):
     Path("groups.json").write_text(json.dumps(
         {{"column": COLUMN, "how": how, "overall": overall, "groups": groups,
-          "classes": classes, "overall_rates": overall_rates}}, indent=1),
-        encoding="utf-8")
+          "classes": classes, "overall_rates": overall_rates, "mitigation": mitigation}},
+        indent=1), encoding="utf-8")
     print(f"groups: {{len(groups)}} groups of {{COLUMN!r}} ({{how}})")
 '''
 
@@ -126,19 +193,20 @@ def capture_raw():
 
 def capture_split(n, y):
     parts = split_indices(n, y)
-    seen["test"] = np.asarray(parts[2])
+    seen["val"], seen["test"] = np.asarray(parts[1]), np.asarray(parts[2])
     return parts
 
 
 module.load_raw, module.split_indices = capture_raw, capture_split
 device = module.pick_device()
 model = module.load_predictor(SOURCE, device=str(device))
-_train, _val, test_loader = module.make_loaders()
+_train, val_loader, test_loader = module.make_loaders()
 outputs, targets = module.predict(model, test_loader, device)
-rows = seen["test"]
+rows, val_rows = seen["test"], seen["val"]
 if {drops_rows!r}:           # "drop rows" imputation: map back to the file's rows
-    rows = np.flatnonzero(seen["x"].notna().all(axis=1).to_numpy())[rows]
-labels, how = read_column(rows)
+    kept = np.flatnonzero(seen["x"].notna().all(axis=1).to_numpy())
+    rows, val_rows = kept[rows], kept[val_rows]
+labels, val_labels, how = read_column(rows, val_rows)
 
 
 def score(mask):
@@ -152,7 +220,7 @@ def score(mask):
 overall = {{"count": int(len(rows)), **score(np.ones(len(rows), bool))}}
 groups = [{{"value": str(v), "count": int((labels == v).sum()), **score(labels == v)}}
           for v in sorted(set(labels))]
-classes = overall_rates = None
+classes = overall_rates = mitigation = None
 if hasattr(module, "NUM_CLASSES") and np.ndim(targets) == 1:   # not multi-label
     scores = module.to_scores(outputs)
     if scores.ndim == 2 and scores.shape[1] > 1:
@@ -161,6 +229,13 @@ if hasattr(module, "NUM_CLASSES") and np.ndim(targets) == 1:   # not multi-label
     else:                                   # binary: the positive class
         pred, classes = (scores.reshape(-1) > 0.5).astype(int), [1]
     truth = np.asarray(targets).astype(int)
+    if classes == [1] and len(val_rows):    # binary: thresholds from the validation rows
+        positive = lambda s: s[:, 1] if s.ndim == 2 and s.shape[1] == 2 else s.reshape(-1)  # noqa: E731
+        val_out, val_targets = module.predict(model, val_loader, device)
+        mitigation = mitigate(
+            (positive(module.to_scores(val_out)), np.asarray(val_targets).astype(int),
+             val_labels),
+            (positive(scores), truth, labels), "validation rows")
     for group in groups:
         mask = labels == group["value"]
         group["rates"] = rates(pred[mask], truth[mask], classes)
@@ -168,7 +243,7 @@ if hasattr(module, "NUM_CLASSES") and np.ndim(targets) == 1:   # not multi-label
     names = getattr(module, "CLASS_NAMES", None)
     classes = [str(names[c]) if names is not None and c < len(names) else str(c)
                for c in classes]
-write(overall, groups, how, classes, overall_rates if classes else None)
+write(overall, groups, how, classes, overall_rates if classes else None, mitigation)
 '''
 
 _CLASSIC = '''
@@ -196,7 +271,7 @@ def score(mask):
 overall = {{"count": int(len(X_test)), **score(np.ones(len(X_test), bool))}}
 groups = [{{"value": str(v), "count": int((labels == v).sum()), **score(labels == v)}}
           for v in sorted(set(labels))]
-classes = overall_rates = None
+classes = overall_rates = mitigation = None
 known = getattr(model, "classes_", None)
 if known is not None and np.ndim(y_test) == 1:
     known = list(known)
@@ -207,7 +282,14 @@ if known is not None and np.ndim(y_test) == 1:
         group["rates"] = rates(pred[mask], truth[mask], picked)
     overall_rates = rates(pred, truth, picked)
     classes = [str(c) for c in picked]
-write(overall, groups, how, classes, overall_rates)
+    if len(known) == 2 and hasattr(model, "predict_proba"):   # no validation rows: halves
+        score = model.predict_proba(X_test)[:, 1]
+        binary = (truth == known[1]).astype(int)
+        half = np.random.default_rng(0).permutation(len(binary)) < len(binary) // 2
+        mitigation = mitigate((score[half], binary[half], labels[half]),
+                              (score[~half], binary[~half], labels[~half]),
+                              "half of the test rows (the other half is compared)")
+write(overall, groups, how, classes, overall_rates, mitigation)
 '''
 
 
@@ -255,7 +337,7 @@ def write_script(workdir: Path, mgr, run_id: str, column: str) -> Path:  # noqa:
     data = _data(record.graph, record.framework)
     common = _COMMON.format(source=str(source), column=column, path=data["path"],
                             fmt=data["format"], max_groups=MAX_GROUPS,
-                            quartiles=QUARTILES_ABOVE)
+                            quartiles=QUARTILES_ABOVE, min_positives=MIN_POSITIVES)
     if record.framework == "sklearn":
         found = sorted(source.glob("*_train_sklearn.py"))
         if not found or not any(source.glob("*_model.joblib")):
@@ -400,4 +482,34 @@ def result(mgr, run_id: str) -> dict:  # noqa: ANN001
         raw = json.loads(path.read_text(encoding="utf-8"))
         out.update(summarize(raw))
         out["fairness"] = fairness(raw)
+        out["mitigation"] = mitigation(raw)
+    return out
+
+
+def mitigation(raw: dict) -> dict | None:
+    """Per-group thresholds (binary classifiers), with fairness before and after on the
+    rows they were not fitted on."""
+    found = raw.get("mitigation")
+    if not found:
+        return None
+    out = dict(found)
+    for side in ("before", "after"):
+        out[f"fairness_{side}"] = fairness({**found[side], "classes": raw.get("classes")})
+    before, after = out["fairness_before"], out["fairness_after"]
+    if before and after:
+        out["helps"] = after["odds_gap"] < before["odds_gap"] - _EXACT
+        change = (f"error rates differ by up to {after['odds_gap']:.0%} instead of "
+                  f"{before['odds_gap']:.0%}, and accuracy is "
+                  f"{found['after']['overall']['accuracy']:.1%} instead of "
+                  f"{found['before']['overall']['accuracy']:.1%}")
+        if out["helps"]:
+            out["summary"] = (
+                f"With a threshold per group (fitted on {found['fitted_on']}), {change}. "
+                + (f"Still treated differently: {', '.join(after['flagged'])}."
+                   if after["flagged"] else "No group stands out."))
+        else:
+            out["summary"] = (
+                f"A threshold per group doesn't help here ({change}): the model's scores "
+                "aren't just shifted for some groups. Try group weights (Class Balancing) "
+                "or more data for the groups it gets wrong.")
     return out

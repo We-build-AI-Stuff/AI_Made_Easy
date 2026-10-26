@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sys
 import time
 import traceback
@@ -46,7 +47,7 @@ INT8_FORMATS = ("onnx_int8", "executorch_int8", "litert_int8")
 ALIASES = {"tflite": "litert"}
 FORMATS = {
     "pytorch": ("onnx", "onnx_int8", "torchscript", "coreml", "openvino", "executorch",
-                "executorch_int8"),
+                "executorch_int8", "gguf"),
     "keras": ("onnx", "saved_model", "litert", "litert_int8"),
     "sklearn": ("onnx",),
 }
@@ -57,9 +58,11 @@ LABELS = {
     "executorch_int8": "ExecuTorch int8 (.pte, XNNPACK)",
     "saved_model": "TensorFlow SavedModel", "litert": "LiteRT (.tflite)",
     "litert_int8": "LiteRT int8 (.tflite)",
+    "gguf": "GGUF (llama.cpp, Ollama, LM Studio)",
 }
 SHORT = {"onnx": "ONNX", "onnx_int8": "ONNX int8", "torchscript": "TorchScript",
          "coreml": "Core ML", "openvino": "OpenVINO", "executorch": "ExecuTorch", "executorch_int8": "ExecuTorch int8",
+         "gguf": "GGUF",
          "saved_model": "SavedModel", "litert": "LiteRT", "litert_int8": "LiteRT int8"}
 _SOURCE = {"pytorch": "PyTorch", "keras": "Keras", "sklearn": "scikit-learn"}
 _MAX_CASES = 16          # inputs every export is checked on
@@ -368,8 +371,9 @@ class Exporter:
     """Runs the requested formats for one model and collects a report."""
 
     def __init__(self, model, framework: str, samples: Samples, out_dir: Path, *,  # noqa: ANN001
-                 log: Callable[[str], None] = print) -> None:
+                 log: Callable[[str], None] = print, merges: list | None = None) -> None:
         self.model, self.framework, self.samples = model, framework, samples
+        self.merges = merges   # a language model's BPE merges (None: one token per byte)
         self.kind = samples.kind
         self.out = Path(out_dir)
         self.log = log
@@ -497,7 +501,8 @@ class Exporter:
                 "coreml": self.coreml,
                 "openvino": [lambda: self.openvino(2), lambda: self.openvino(1)],
                 "executorch": lambda: self.executorch(False),
-                "executorch_int8": lambda: self.executorch(True)}
+                "executorch_int8": lambda: self.executorch(True),
+                "gguf": self.gguf}
 
     def _tensors(self, case: tuple) -> tuple:
         import torch
@@ -696,6 +701,90 @@ class Exporter:
             return method.execute(list(self._tensors(case)))[0].float().numpy()
         return path, run, note
 
+    def gguf(self) -> tuple:
+        """A Llama-style decoder as one GGUF file (float32) for llama.cpp, Ollama and LM
+        Studio, with its byte-level tokenizer; checked token by token against PyTorch
+        with llama-cpp-python when it is installed."""
+        import gguf
+        import torch
+
+        layout = llama_layout(self.model)
+        context = int(np.asarray(self.samples.cases[0][0]).shape[-1])
+        path = self.out / "model.gguf"
+        writer = gguf.GGUFWriter(str(path), "llama")
+        writer.add_name("AI Made Easy decoder")
+        writer.add_context_length(context)
+        writer.add_embedding_length(layout["dim"])
+        writer.add_block_count(len(layout["blocks"]))
+        writer.add_feed_forward_length(layout["hidden"])
+        writer.add_head_count(layout["heads"])
+        writer.add_head_count_kv(layout["kv_heads"])
+        writer.add_layer_norm_rms_eps(layout["eps"])
+        writer.add_rope_freq_base(10000.0)
+        writer.add_rope_dimension_count(layout["head_dim"])
+        writer.add_vocab_size(layout["vocab"])
+        writer.add_file_type(gguf.LlamaFileType.ALL_F32)
+        tokens, rules = gguf_vocabulary(layout["vocab"], self.merges)
+        writer.add_tokenizer_model("gpt2")
+        writer.add_tokenizer_pre("gpt-2")
+        writer.add_token_list(tokens)
+        writer.add_token_types([gguf.TokenType.NORMAL] * len(tokens))
+        # llama.cpp needs merges and gguf can't write none: a byte model gets one merge
+        # of two-byte pieces, which never occur (text starts as single bytes)
+        writer.add_token_merges(rules or [f"{tokens[0] * 2} {tokens[0] * 2}"])
+        writer.add_bos_token_id(0)            # no special tokens: the model reads raw text
+        writer.add_eos_token_id(0)
+        writer.add_add_bos_token(False)
+        writer.add_add_eos_token(False)
+
+        def put(name: str, tensor) -> None:  # noqa: ANN001
+            writer.add_tensor(name, tensor.detach().float().cpu().numpy().astype(np.float32))
+
+        kv = layout["kv_heads"] * layout["head_dim"]
+        with torch.no_grad():
+            put("token_embd.weight", layout["embed"].weight)
+            for i, block in enumerate(layout["blocks"]):
+                k, v = block.attn.kv.weight[:kv], block.attn.kv.weight[kv:]
+                gate, up = block.ffn.gate_up.weight.chunk(2, dim=0)
+                for name, tensor in (("attn_norm", block.norm1.weight),
+                                     ("attn_q", block.attn.q.weight), ("attn_k", k),
+                                     ("attn_v", v), ("attn_output", block.attn.out.weight),
+                                     ("ffn_norm", block.norm2.weight), ("ffn_gate", gate),
+                                     ("ffn_up", up), ("ffn_down", block.ffn.down.weight)):
+                    put(f"blk.{i}.{name}.weight", tensor)
+            norm = getattr(layout["norm"], "weight", None)
+            put("output_norm.weight", norm if norm is not None else torch.ones(layout["dim"]))
+            put("output.weight", layout["head"].weight)
+        writer.write_header_to_file()
+        writer.write_kv_data_to_file()
+        writer.write_tensors_to_file()
+        writer.close()
+        note = f"the run's {len(rules)} BPE merges" if rules else "one token per byte"
+        runner = self._llama_cpp(path, context)
+        if runner is None:
+            note += "; not checked here (pip install llama-cpp-python to check it)"
+        return path, runner, note
+
+    def _llama_cpp(self, path: Path, context: int) -> Runner | None:
+        try:
+            from llama_cpp import Llama
+        except ImportError:
+            return None
+        # on the CPU with a float32 cache (llama.cpp keeps keys and values in float16 by
+        # default, which alone moves the logits by ~5e-4)
+        llm = Llama(model_path=str(path), n_ctx=context, logits_all=True, verbose=False,
+                    n_gpu_layers=0, type_k=0, type_v=0, flash_attn=False,
+                    n_threads=max(1, min(4, os.cpu_count() or 1)))
+
+        def run(case: tuple) -> np.ndarray:
+            rows = []
+            for ids in np.asarray(case[0]).reshape(-1, context):
+                llm.reset()
+                llm.eval([int(t) for t in ids])
+                rows.append(np.asarray(llm.scores[:context], np.float64))
+            return np.stack(rows)
+        return run
+
     # ------------------------------------------------------------ Keras
     def _keras_table(self) -> dict:
         return {"onnx": self.keras_onnx, "saved_model": self.saved_model,
@@ -800,6 +889,79 @@ class _plain_attention:  # noqa: N801 — a context manager
             torch.backends.mha.set_fastpath_enabled(self._was)
 
 
+def llama_layout(model) -> dict:  # noqa: ANN001 — torch.nn.Module
+    """A Llama-style decoder's sizes: Embedding, Llama blocks, RMSNorm and a Linear head
+    without bias, in that order. Raises Skipped for any other model."""
+    import math
+
+    import torch
+
+    reason = ("GGUF holds Llama-style decoders (Embedding → Llama Decoder Blocks → RMSNorm "
+              "→ Dense without bias, as in the Tiny Llama recipe)")
+    parts = list(model.children())
+    names = [type(p).__name__ for p in parts]
+    if len(parts) < 4 or names[0] != "Embedding" or names[-2] != "RMSNorm" \
+            or names[-1] != "Linear" or any(n != "LlamaBlock" for n in names[1:-2]):
+        raise Skipped(f"{reason}; this model is {' → '.join(names) or 'empty'}")
+    embed, blocks, norm, head = parts[0], parts[1:-2], parts[-2], parts[-1]
+    first = blocks[0]
+    attn, ffn = first.attn, first.ffn
+    hidden = ffn.down.in_features
+    out = {"vocab": embed.num_embeddings, "dim": embed.embedding_dim, "blocks": blocks,
+           "heads": attn.heads, "kv_heads": attn.kv_heads, "head_dim": attn.head_dim,
+           "hidden": hidden, "eps": float(first.norm1.eps), "embed": embed, "norm": norm,
+           "head": head}
+    if head.bias is not None or head.out_features != out["vocab"] \
+            or head.in_features != out["dim"]:
+        raise Skipped(f"{reason}; the last Dense must map {out['dim']} features to the "
+                      f"{out['vocab']} tokens, without bias")
+    for block in blocks:
+        a, f = block.attn, block.ffn
+        same = (a.heads, a.kv_heads, a.head_dim, f.down.in_features) == (
+            out["heads"], out["kv_heads"], out["head_dim"], hidden)
+        if not same or not a.causal or a.rope is None or not isinstance(f.act, torch.nn.SiLU):
+            raise Skipped(f"{reason}; every block needs the same sizes, causal attention, "
+                          "rotary positions and SwiGLU")
+        inv = 1.0 / 10000.0 ** (torch.arange(0, a.head_dim, 2).float() / a.head_dim)
+        if not torch.allclose(a.rope.inv_freq.float().cpu(), inv):
+            raise Skipped(f"{reason}; rotary positions must use base 10000")
+    final_eps = getattr(norm, "eps", None)
+    if final_eps is not None and not math.isclose(final_eps, out["eps"], rel_tol=1e-6):
+        raise Skipped(f"{reason}; llama.cpp uses one RMSNorm epsilon: the blocks have "
+                      f"{out['eps']}, the last norm {final_eps}")
+    return out
+
+
+def _byte_text() -> dict[int, str]:
+    """GPT-2's printable stand-in for each byte, which byte-level BPE vocabularies use."""
+    keep = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) \
+        + list(range(ord("®"), ord("ÿ") + 1))
+    out, extra = {}, 0
+    for b in range(256):
+        if b in keep:
+            out[b] = chr(b)
+        else:
+            out[b] = chr(256 + extra)
+            extra += 1
+    return out
+
+
+def gguf_vocabulary(vocab: int, merges: list | None) -> tuple[list[str], list[str]]:
+    """The tokens (ids 0-255 are bytes, then one per BPE merge) and the merges, written
+    the way llama.cpp's byte-level BPE (\"gpt2\") tokenizer reads them."""
+    text = _byte_text()
+    pieces = {i: bytes([i]) for i in range(256)}
+    rules = []
+    for i, (a, b) in enumerate(merges or []):
+        pieces[256 + i] = pieces[int(a)] + pieces[int(b)]
+        rules.append(f"{''.join(text[x] for x in pieces[int(a)])} "
+                     f"{''.join(text[x] for x in pieces[int(b)])}")
+    if len(pieces) != vocab:
+        raise Skipped(f"the model has {vocab} tokens but its tokenizer {len(pieces)}")
+    tokens = ["".join(text[x] for x in pieces[i]) for i in range(vocab)]
+    return tokens, rules
+
+
 def _short(exc: Exception) -> str:
     """The useful line of an exporter error (some put the whole TorchScript graph in)."""
     text = str(exc).strip() or type(exc).__name__
@@ -831,9 +993,10 @@ def _litert_runner(path: Path) -> Runner | None:
 
 
 def export_all(model, framework: str, formats, out_dir: Path, samples: Samples, *,  # noqa: ANN001
-               log: Callable[[str], None] = print) -> dict:
-    """Export ``model`` to every format in ``formats``; the per-format report."""
-    return Exporter(model, framework, samples, out_dir, log=log).run(formats)
+               log: Callable[[str], None] = print, merges: list | None = None) -> dict:
+    """Export ``model`` to every format in ``formats``; the per-format report. A language
+    model's BPE ``merges`` go into its GGUF tokenizer."""
+    return Exporter(model, framework, samples, out_dir, log=log, merges=merges).run(formats)
 
 
 def summary(report: dict) -> dict:

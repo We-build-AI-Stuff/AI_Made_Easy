@@ -141,7 +141,25 @@ def blockers(graph, framework: str | None = None) -> dict[str, tuple[str, str | 
             continue
         for fmt in blocker.formats:
             out.setdefault(fmt, (blocker.reason, node.instance_id))
+    if not _llama_decoder(graph):
+        out.setdefault("gguf", (GGUF_ONLY, None))
     return out
+
+
+GGUF_ONLY = ("GGUF holds Llama-style language models: Embedding → Llama Decoder Blocks → "
+             "RMSNorm → Dense without bias, as in the Tiny Llama recipe")
+
+
+def _llama_decoder(graph) -> bool:  # noqa: ANN001 — Graph
+    """Layers llama.cpp's ``llama`` architecture reads one to one (the export checks the
+    order and the sizes)."""
+    layers = [n for n in graph.nodes.values()
+              if n.type_id.startswith("core.") and n.type_id not in ("core.input", "core.output")]
+    kinds = [n.type_id for n in layers]
+    dense = [n for n in layers if n.type_id == "core.dense"]
+    return (set(kinds) == {"core.embedding", "core.llama_block", "core.rms_norm", "core.dense"}
+            and kinds.count("core.embedding") == kinds.count("core.rms_norm") == 1
+            and len(dense) == 1 and not dense[0].resolved_params().get("bias", True))
 
 
 def suggested_formats(device_id: str, framework: str) -> list[str]:

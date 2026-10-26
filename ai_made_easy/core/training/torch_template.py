@@ -170,13 +170,17 @@ TORCH_TRAINING = r'''
 def make_loaders():
     train, val, test = make_datasets()
     generator = torch.Generator().manual_seed(SEED)
-{% if balance == "oversample" %}
+{% if balance in ("oversample", "group weights") %}
     labels = dataset_targets(train).astype(int)
-    weights = 1.0 / np.bincount(labels, minlength=NUM_CLASSES).clip(min=1)
+{% if balance == "group weights" %}
+    weights = group_weights(TRAIN_GROUPS, labels)   # rows of each group and class
+{% else %}
+    weights = (1.0 / np.bincount(labels, minlength=NUM_CLASSES).clip(min=1))[labels]
+{% endif %}
     if WORLD > 1:   # each GPU's process draws its share, from its own generator
         generator = torch.Generator().manual_seed(SEED + RANK)
     sampler = torch.utils.data.WeightedRandomSampler(
-        torch.as_tensor(weights[labels], dtype=torch.double), len(labels) // WORLD,
+        torch.as_tensor(weights, dtype=torch.double), len(labels) // WORLD,
         generator=generator)
     train_loader = DataLoader(train, batch_size=BATCH_SIZE, sampler=sampler,
                               num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY and torch.cuda.is_available(), drop_last=DROP_LAST)

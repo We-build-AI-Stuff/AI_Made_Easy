@@ -110,8 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     p_dep.add_argument("run_id")
     p_dep.add_argument("-o", "--out", default=None, help="output folder (must be empty)")
     p_dep.add_argument("--formats", default="", help="comma-separated: onnx, onnx_int8, "
-                       "torchscript, coreml, openvino, executorch, executorch_int8 "
-                       "(PyTorch); onnx, "
+                       "torchscript, coreml, openvino, executorch, executorch_int8, "
+                       "gguf (PyTorch); onnx, "
                        "saved_model, litert, litert_int8 (Keras); or 'suggested' for the "
                        "formats the project's budget device runs")
     p_dep.add_argument("--list-formats", action="store_true",

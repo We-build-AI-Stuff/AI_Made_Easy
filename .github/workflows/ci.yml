@@ -279,7 +279,8 @@ jobs:
 
   test-openvino:
     # 3.10: OpenVINO on x86 Linux: every sample and the 3.7 / 3.8 layers run on the CPU
-    # and match PyTorch in float32, or an export rule says why not
+    # and match PyTorch in float32, or an export rule says why not. 3.11: GGUF exports
+    # load in llama.cpp (llama-cpp-python) and match PyTorch token by token
     needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -305,6 +306,14 @@ jobs:
           pip install -e ".[dev,export,openvino,graph]"
       - name: OpenVINO exports run and match PyTorch
         run: pytest -q -p no:cacheprovider -rfE tests/test_openvino.py tests/test_export.py -k "openvino"
+      - name: Install gguf and llama.cpp
+        run: |
+          pip install -e ".[gguf]"
+          pip install llama-cpp-python --prefer-binary \
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+          python -c "import llama_cpp, gguf"      # the checks below skip without them
+      - name: GGUF exports load in llama.cpp, match PyTorch and tokenize like the run
+        run: pytest -q -p no:cacheprovider -rfE --run-slow tests/test_v311_features.py -k "gguf"
 
   test-tools:
     # 3.2 Phase 3: MLflow (local SQLite store) and W&B (offline) mirror real runs; the
