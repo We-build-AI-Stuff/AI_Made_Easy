@@ -268,6 +268,7 @@ def main() -> None:
 {% endif %}
     optimizer = {{ optimizer_expr }}
     train_model.compile(optimizer=optimizer, loss={{ loss_expr }}, jit_compile=COMPILE)
+    optimizer = train_model.optimizer   # mixed_float16 wraps it in a LossScaleOptimizer
     callbacks = [EpochReport(x_val, y_val)]
     if EARLY_STOP:
         callbacks.append(keras.callbacks.EarlyStopping(
