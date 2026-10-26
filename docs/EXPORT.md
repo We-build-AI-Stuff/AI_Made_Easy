@@ -60,7 +60,12 @@ pip install tensorflow                  # Keras -> LiteRT
 
 - **ExecuTorch** (PyTorch): lowered to XNNPACK for phone and embedded CPUs, with a fixed
   batch of one. **ExecuTorch int8** quantizes weights and activations (PT2E, symmetric
-  int8), calibrated on the run's training samples.
+  int8), calibrated on the run's training samples. If int8 loses too much accuracy, set
+  the Trainer's **QAT epochs**: after training, the run fine-tunes a copy with int8
+  rounding simulated (quantization-aware training, Adam at 1e-4 on the CPU), reports its
+  int8 test scores (`int8_accuracy`, ...) and saves `qat_int8.pt2`, which this export
+  then uses instead of calibrating. Models with one input and output (not metric
+  learning, pairs, two views or probabilistic heads).
 - **LiteRT** (Keras): the `.tflite` file has a fixed batch of one. **LiteRT int8** is full
   integer quantization with float inputs and outputs, calibrated on the same samples.
   LiteRT needs Keras on TensorFlow. If the run trained on the torch backend and TensorFlow

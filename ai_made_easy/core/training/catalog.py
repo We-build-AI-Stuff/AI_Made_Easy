@@ -1001,6 +1001,23 @@ METRICS: list[Component] = [
 
 # ===================================================================== others
 
+def _trainer_checks(p: dict) -> list[tuple[str, str]]:
+    ema, swa = float(p.get("ema_decay") or 0), int(p.get("swa_start") or 0)
+    out = []
+    if ema and swa:
+        out.append(("error", "use one kind of weight averaging: EMA or SWA"))
+    if swa > int(p.get("epochs") or 1):
+        out.append(("warning", "SWA starts after the last epoch, so it never averages "
+                               "anything"))
+    if p.get("sharding") and int(p.get("gpus") or 1) < 2:
+        out.append(("warning", "sharding splits a model between several GPUs: set GPUs "
+                               "to 2 or more"))
+    if p.get("sharding") and (ema or swa):
+        out.append(("error", "sharded training keeps no averaged weights: turn off EMA / "
+                             "SWA, or sharding"))
+    return out
+
+
 TRAINER = Component(
     "train.trainer", "Trainer",
     (P("epochs", "int", 10, lo=1), P("batch_size", "int", 32, lo=1),
@@ -1010,6 +1027,9 @@ TRAINER = Component(
      P("grad_clip_norm", "float", 0.0, lo=0.0, help="Max gradient norm; 0 = off"),
      P("accumulation_steps", "int", 1, lo=1, help="Batches per optimizer step"),
      P("mixed_precision", "bool", False, help="Automatic mixed precision on CUDA/MPS"),
+     P("precision", "enum", "auto", options=("auto", "float16", "bfloat16"),
+       help="Mixed precision's number format: auto = float16 on CUDA, bfloat16 on MPS. "
+            "bfloat16 needs no loss scaling (CUDA GPUs from Ampere on) (PyTorch)"),
      P("deterministic", "bool", False,
        help="Deterministic kernels for bit-reproducible runs (slower)"),
      P("ema_decay", "float", 0.0, lo=0.0, hi=0.99999,
@@ -1026,15 +1046,19 @@ TRAINER = Component(
             "them: less memory for about a third more compute (PyTorch)"),
      P("gpus", "int", 1, lo=1, hi=64,
        help="GPUs of one machine that train together (DistributedDataParallel); the "
-            "batch size is per GPU (PyTorch)")),
+            "batch size is per GPU (PyTorch)"),
+     P("sharding", "bool", False,
+       help="With several GPUs: split the weights, gradients and optimizer state between "
+            "them (FSDP), so a model too big for one GPU trains. Sharded runs don't "
+            "resume (PyTorch)"),
+     P("qat_epochs", "int", 0, lo=0,
+       help="Quantization-aware training: after training, fine-tune this many epochs "
+            "with int8 rounding simulated, for the ExecuTorch int8 export; 0 = off "
+            "(PyTorch, needs the export extra)")),
     desc="Training loop: epochs, batching, device, early stopping, clipping, AMP, "
-         "weight averaging (EMA or SWA), compiling, gradient checkpointing, several GPUs.",
-    checks=lambda p: ([("error", "use one kind of weight averaging: EMA or SWA")]
-                      if float(p.get("ema_decay") or 0) and int(p.get("swa_start") or 0)
-                      else []) + ([("warning", "SWA starts after the last epoch, so it never "
-                                               "averages anything")]
-                                  if int(p.get("swa_start") or 0) > int(p.get("epochs") or 1)
-                                  else []))
+         "weight averaging (EMA or SWA), compiling, gradient checkpointing, several GPUs "
+         "(optionally sharded), quantization-aware training.",
+    checks=lambda p: _trainer_checks(p))
 
 KFOLD = Component(
     "train.kfold", "K-Fold Cross-Validation",

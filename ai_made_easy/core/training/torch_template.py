@@ -24,6 +24,7 @@ Notes:
 """
 from __future__ import annotations
 
+import copy
 import json
 import math
 import sys
@@ -55,6 +56,9 @@ MIXED_PRECISION = {{ spec.trainer.mixed_precision }}
 COMPILE = {{ spec.trainer.compile }}   # torch.compile the training steps
 CHECKPOINTING = {{ spec.trainer.gradient_checkpointing }}   # recompute activations: less memory
 GPUS = {{ gpus | default(1) }}   # GPUs of this machine that train together (DistributedDataParallel)
+SHARDED = {{ sharded | default(False) }}   # with several GPUs: split the model between them (FSDP)
+PRECISION = "{{ spec.trainer.precision | default('auto') }}"   # mixed precision: auto, float16 or bfloat16
+QAT_EPOCHS = {{ qat_epochs | default(0) }}   # quantization-aware fine-tuning for the int8 export
 RANK, WORLD = 0, 1      # this process's place among them (set for each GPU's process)
 {% if ema %}
 EMA_DECAY = {{ spec.trainer.ema_decay }}   # evaluate and keep the averaged weights
@@ -340,6 +344,27 @@ class GeneratorState:
         self.generator.set_state(state.cpu())
 
 
+def replace_together(moves: list) -> None:
+    """Move written files into place one after another, holding a stop (SIGTERM, Ctrl+C)
+    until the last: together they describe one epoch, and a stop between two would leave
+    the app and the resumed script disagreeing about which."""
+    import signal
+    import threading
+
+    held = []
+    caught = (signal.SIGTERM, signal.SIGINT)
+    here = threading.current_thread() is threading.main_thread()   # where handlers can go
+    before = {s: signal.signal(s, lambda n, _f: held.append(n)) for s in caught} if here else {}
+    try:
+        for tmp, final in moves:
+            Path(tmp).replace(final)
+    finally:
+        for s, handler in before.items():
+            signal.signal(s, handler if handler is not None else signal.SIG_DFL)
+        if held:
+            signal.raise_signal(held[0])   # the stop, now that the files agree
+
+
 def save_resume(epoch: int, objects: dict, best: tuple) -> None:
     """The model, optimizer and the rest after ``epoch``, written atomically."""
     state = {name: obj.state_dict() for name, obj in objects.items()}
@@ -349,11 +374,10 @@ def save_resume(epoch: int, objects: dict, best: tuple) -> None:
         "mps": torch.mps.get_rng_state() if torch.backends.mps.is_available() else None})
     tmp = Path(RESUME_FILE + ".tmp")
     torch.save(state, tmp)
-    tmp.replace(RESUME_FILE)
     info = Path(RESUME_FILE).with_suffix(".json")   # read by the app, without torch
     info.with_suffix(".json.tmp").write_text(json.dumps({"epoch": epoch, "epochs": EPOCHS}),
                                              encoding="utf-8")
-    info.with_suffix(".json.tmp").replace(info)   # a stop mid-write leaves the last one whole
+    replace_together([(tmp, RESUME_FILE), (info.with_suffix(".json.tmp"), info)])
 
 
 def load_resume(objects: dict, device) -> tuple[int, tuple]:  # noqa: ANN001
@@ -401,10 +425,21 @@ class Compiled:
         return self.model(x)
 
 
+def _recomputed(layer: nn.Module, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+    from torch.utils.checkpoint import checkpoint
+
+    forward = type(layer).forward.__get__(layer)
+    if layer.training and torch.is_grad_enabled():
+        return checkpoint(forward, *args, use_reentrant=False, **kwargs)
+    return forward(*args, **kwargs)
+
+
 def checkpoint_layers(model: nn.Module) -> int:
     """Recompute each layer's activations in the backward pass instead of keeping them.
-    Layers with batch norm keep theirs (recomputing would update its statistics twice)."""
-    from torch.utils.checkpoint import checkpoint
+    Layers with batch norm keep theirs (recomputing would update its statistics twice).
+    Each wrapper is a method bound to its layer, so a copy of the model (EMA, SWA,
+    quantization-aware training) runs its own layers."""
+    import types
 
     count = 0
     for layer in model.children():
@@ -412,13 +447,7 @@ def checkpoint_layers(model: nn.Module) -> int:
                 or not any(p.requires_grad for p in layer.parameters())
                 or any(isinstance(m, nn.modules.batchnorm._BatchNorm) for m in layer.modules())):
             continue
-
-        def recomputed(*args, _forward=layer.forward, _layer=layer, **kwargs):  # noqa: ANN002, ANN003, ANN202
-            if _layer.training and torch.is_grad_enabled():
-                return checkpoint(_forward, *args, use_reentrant=False, **kwargs)
-            return _forward(*args, **kwargs)
-
-        layer.forward = recomputed
+        layer.forward = types.MethodType(_recomputed, layer)
         count += 1
     return count
 
@@ -428,8 +457,9 @@ def train_together(gpus: int) -> None:
     DistributedDataParallel. This process trains as the first one, which reports and
     saves; the others are forked (spawned on Windows, which can't fork) and only train."""
     import json
-    import socket
+    import shutil
     import subprocess
+    import tempfile
 
     import torch.multiprocessing as mp
 
@@ -448,9 +478,11 @@ def train_together(gpus: int) -> None:
         globals()["GPUS"] = 1
         main()
         return
-    with socket.socket() as probe:   # a free port for the processes to meet on
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    # the processes meet through a file: a free port can be taken before they bind it, and
+    # connecting to it was slow on macOS (minutes) and can ask for a firewall rule on Windows
+    folder = tempfile.mkdtemp(prefix="aime-ddp-")
+    path = Path(folder, "meet").resolve().as_posix()
+    meet = "file://" + ("" if path.startswith("/") else "/") + path
 
     def plain(value) -> bool:  # noqa: ANN001
         try:
@@ -466,26 +498,30 @@ def train_together(gpus: int) -> None:
     if START_METHOD != "fork" and dropped:
         print(f"warning: {', '.join(dropped)} can't be passed to the other processes here "
               "(they start from this file): they train without them", flush=True)
-    print(f"training on {count} {'CPU processes' if DEVICE == 'cpu' else 'GPUs'} "
-          "(DistributedDataParallel)", flush=True)
+    how = "FSDP: the model is split between them" if SHARDED else "DistributedDataParallel"
+    print(f"training on {count} {'CPU processes' if DEVICE == 'cpu' else 'GPUs'} ({how})",
+          flush=True)
     sys.stdout.flush()
-    others = mp.start_processes(_one_of_many, args=(count, port, settings), nprocs=count - 1,
+    others = mp.start_processes(_one_of_many, args=(count, meet, settings), nprocs=count - 1,
                                 join=False, start_method=START_METHOD)
     done = threading.Event()
-    threading.Thread(target=_watch, args=(others.processes, done), daemon=True).start()
+    threading.Thread(target=_watch, args=(others.processes, done, folder), daemon=True).start()
 
     def stop_others() -> None:   # they would wait for this one until the backend times out
         done.set()
         _stop(others.processes)
 
     try:
-        _train_as(0, count, port, stop_others)
-    except BaseException:
-        stop_others()
-        raise
-    done.set()
-    while not others.join():
-        pass
+        try:
+            _train_as(0, count, meet, stop_others)
+        except BaseException:
+            stop_others()
+            raise
+        done.set()
+        while not others.join():
+            pass
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _stop(processes: list) -> None:
@@ -494,7 +530,7 @@ def _stop(processes: list) -> None:
             process.terminate()
 
 
-def _watch(processes: list, done: threading.Event) -> None:
+def _watch(processes: list, done: threading.Event, folder: str = "") -> None:
     """While this process trains, notice another one failing: this one would wait for it
     in the next exchange until the backend times out."""
     import os
@@ -505,22 +541,26 @@ def _watch(processes: list, done: threading.Event) -> None:
             print(f"a training process stopped (exit code {failed.exitcode}): stopping the "
                   "run", flush=True)
             _stop(processes)
+            if folder:   # os._exit skips the cleanup
+                import shutil
+
+                shutil.rmtree(folder, ignore_errors=True)
             os._exit(1)
 
 
 START_METHOD = "spawn" if sys.platform == "win32" else "fork"
 
 
-def _one_of_many(index: int, world: int, port: int, settings: dict) -> None:
+def _one_of_many(index: int, world: int, meet: str, settings: dict) -> None:
     """Process ``index + 1`` of ``world``: trains its share, reports nothing."""
     import os
 
     globals().update(settings)
     sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
-    _train_as(index + 1, world, port)
+    _train_as(index + 1, world, meet)
 
 
-def _train_as(rank: int, world: int, port: int, on_failure=None) -> None:  # noqa: ANN001
+def _train_as(rank: int, world: int, meet: str, on_failure=None) -> None:  # noqa: ANN001
     import torch.distributed as dist
 
     global RANK, WORLD
@@ -529,8 +569,7 @@ def _train_as(rank: int, world: int, port: int, on_failure=None) -> None:  # noq
     if gpu:
         torch.cuda.set_device(rank)
     backend = "nccl" if gpu and sys.platform != "win32" else "gloo"   # no NCCL on Windows
-    dist.init_process_group(backend, init_method=f"tcp://127.0.0.1:{port}", rank=rank,
-                            world_size=world)
+    dist.init_process_group(backend, init_method=meet, rank=rank, world_size=world)
     try:
         main()
     except BaseException:
@@ -538,6 +577,40 @@ def _train_as(rank: int, world: int, port: int, on_failure=None) -> None:  # noq
             on_failure()   # first, before anything can wait on the other processes
         raise              # no teardown: it can wait on processes that are gone
     dist.destroy_process_group()
+
+
+def shard(model: nn.Module, device: torch.device) -> None:
+    """Split each layer's weights (and so its gradients and optimizer state) between the
+    processes; a layer gathers its weights only while it computes (FSDP)."""
+    from torch.distributed.device_mesh import init_device_mesh
+    try:
+        from torch.distributed.fsdp import fully_shard
+    except ImportError:
+        try:
+            from torch.distributed._composable.fsdp import fully_shard   # PyTorch 2.4-2.5
+        except ImportError:
+            raise SystemExit("sharding (FSDP2) needs PyTorch 2.4 or newer; this is "
+                             f"{torch.__version__}") from None
+
+    mesh = init_device_mesh(device.type, (WORLD,))
+    for layer in model.children():
+        if any(p.requires_grad for p in layer.parameters()):
+            fully_shard(layer, mesh=mesh)
+    fully_shard(model, mesh=mesh)
+
+
+def snapshot(model: nn.Module) -> dict:
+    """The weights, on the CPU; sharded weights are gathered whole on the first process
+    (every process takes part)."""
+    if WORLD > 1 and SHARDED:
+        from torch.distributed.checkpoint.state_dict import (
+            StateDictOptions,
+            get_model_state_dict,
+        )
+
+        return get_model_state_dict(model, options=StateDictOptions(full_state_dict=True,
+                                                                    cpu_offload=True))
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
 
 def mean_across(grad: torch.Tensor, group) -> torch.Tensor:  # noqa: ANN001
@@ -560,6 +633,12 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
 {% if prob and prob.kl %}
     kl_scale = 1.0 / max(len(train_loader.dataset), 1)   # ELBO per training example
 {% endif %}
+    unsharded = None
+    if WORLD > 1 and SHARDED:   # the first process keeps a whole copy to test and save
+        if RANK == 0:   # copied on the CPU: never a second whole copy on the GPU
+            unsharded = copy.deepcopy(model.cpu())
+            model.to(device)
+        shard(model, device)
     params = PARAM_GROUPS(model) if PARAM_GROUPS is not None else model.parameters()
     optimizer = {{ optimizer_expr | replace("model.parameters()", "params") }}
 {% if metric_loss %}
@@ -595,10 +674,18 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
 {% else %}
     use_amp = MIXED_PRECISION and device.type in ("cuda", "mps")
 {% endif %}
-    amp_dtype = torch.float16 if device.type == "cuda" else torch.bfloat16
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")
+    amp_dtype = (torch.bfloat16 if PRECISION == "bfloat16"
+                 or (PRECISION == "auto" and device.type != "cuda") else torch.float16)
+    # float16 needs its loss scaled so small gradients don't vanish; bfloat16 doesn't
+    scaling = use_amp and device.type == "cuda" and amp_dtype == torch.float16
+    if WORLD > 1 and SHARDED:   # each process sees its gradients' shard: agree on skipping
+        from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+
+        scaler = ShardedGradScaler("cuda", enabled=scaling)
+    else:
+        scaler = torch.amp.GradScaler("cuda", enabled=scaling)
     net = model   # what the training steps call
-    if WORLD > 1:
+    if WORLD > 1 and not SHARDED:
         net = nn.parallel.DistributedDataParallel(
             model, device_ids=[device.index] if device.type == "cuda" else None,
             # experts a batch never routes to get no gradient
@@ -760,15 +847,22 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
                   f"{extra} lr={lr:.3g} ({time.time() - started:.1f}s)", flush=True)
         if monitored < best_loss:
             best_loss, bad_epochs = monitored, 0
-            best_state = {k: v.detach().cpu().clone() for k, v in {{ "ema.module" if ema else ("scored" if swa else "model") }}.state_dict().items()}
+            best_state = snapshot({{ "ema.module" if ema else ("scored" if swa else "model") }})
         else:
             bad_epochs += 1
             if EARLY_STOP and bad_epochs >= EARLY_STOP:
                 if log:
                     print(f"early stopping: no improvement for {EARLY_STOP} epochs")
                 break
-        if log and RESUME_FILE and RANK == 0:
+        if log and RESUME_FILE and RANK == 0 and not SHARDED:
             save_resume(epoch, resumable, (best_loss, best_state, bad_epochs))
+    if WORLD > 1 and SHARDED:
+        best_state = best_state if best_state is not None else snapshot(model)
+        if RANK:   # only the first process holds the gathered weights
+            return model, loss_fn
+        for layer in unsharded.modules():   # checkpointing's wrappers point at the shards
+            layer.__dict__.pop("forward", None)
+        model = unsharded.to(device)
     if best_state is not None:
         model.load_state_dict(best_state)
     return model, loss_fn

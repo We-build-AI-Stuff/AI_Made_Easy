@@ -239,6 +239,157 @@ def _dropout(design: dict) -> dict:
     return design
 
 
+# ------------------------------------------------------------ Phase 1: bigger models
+def test_bfloat16_needs_no_loss_scaling():
+    from ai_made_easy.core.training.generate import generate_training
+
+    source = generate_training(Graph.from_dict(_design(precision="bfloat16",
+                                                       mixed_precision=True)), "pytorch")
+    assert 'PRECISION = "bfloat16"' in source
+    assert 'device.type == "cuda" and amp_dtype == torch.float16' in source   # float16 only
+    # sharded, each process holds a shard of the gradients: they agree on skipping a step
+    assert 'ShardedGradScaler("cuda", enabled=scaling)' in source
+    plain = generate_training(Graph.from_dict(_design()), "pytorch")
+    assert 'PRECISION = "auto"' in plain and "SHARDED = False" in plain
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform == "win32", reason="forks; the spawn test covers Windows")
+@pytest.mark.parametrize("checkpointing", [False, True])
+def test_sharded_processes_train_and_save_a_whole_model(tmp_path, checkpointing):
+    torch = pytest.importorskip("torch")
+    design = _design(gpus=2, sharding=True, epochs=4, gradient_checkpointing=checkpointing)
+    out = _ok(_run(tmp_path, _script(design, tmp_path)))
+    assert "training on 2 CPU processes (FSDP: the model is split between them)" in out
+    assert [line.split()[1] for line in out.splitlines() if line.startswith("epoch")] == \
+        ["1/4", "2/4", "3/4", "4/4"]
+    weights = torch.load(next(tmp_path.glob("*_best.pt")))
+    assert all(not hasattr(w, "placements") for w in weights.values())   # plain tensors
+    assert weights["dense_1.weight"].shape == (8, 16)                     # whole, not a shard
+    assert json.loads((tmp_path / "metrics.json").read_text(encoding="utf-8"))["accuracy"] > 0.5
+    assert not (tmp_path / "resume.pt").exists()                 # sharded runs don't resume
+
+
+def test_sharding_checks_and_memory():
+    from ai_made_easy.core import budget
+    from ai_made_easy.core.training.catalog import TRAINER
+
+    messages = [m for _, m in TRAINER.checks({"sharding": True, "gpus": 1})]
+    assert any("set GPUs to 2 or more" in m for m in messages)
+    assert ("error", "sharded training keeps no averaged weights: turn off EMA / SWA, or "
+                     "sharding") in TRAINER.checks({"sharding": True, "gpus": 2,
+                                                    "ema_decay": 0.99})
+    whole = budget.estimate(Graph.from_dict(_design(gpus=4)))
+    sharded = budget.estimate(Graph.from_dict(_design(gpus=4, sharding=True)))
+    assert sharded.sharded and not whole.sharded
+    model_part = lambda e: e.train_memory_bytes(batch_size=0) - (e.device.overhead_gb * budget.GB  # noqa: E731
+                                                               if e.device else 0)
+    assert model_part(sharded) < model_part(whole)
+    # each GPU holds the whole weights once, before they are split
+    assert model_part(sharded) >= sharded.params * 4
+
+
+def test_the_fix_for_memory_shards_a_model_on_several_gpus(monkeypatch):
+    from ai_made_easy.core import budget, fixes
+
+    graph = Graph.from_dict(_design(gpus=4, mixed_precision=True))   # already on
+    est = budget.estimate(graph)
+    whole, sharded_bytes = est.train_memory_bytes(), None
+    est.sharded = True
+    sharded_bytes = est.train_memory_bytes()
+    limit = (whole + sharded_bytes) / 2 / budget.GB              # fits only when sharded
+    monkeypatch.setattr(budget, "check", lambda g: [type("C", (), {"kind": "train_memory",
+                                                                   "limit": limit})()])
+    fixed = fixes._fit_training_memory(graph)
+    assert fixed and fixed[0] == "Shard the model"
+    trainer = next(n for n in fixed[2].nodes.values() if n.type_id == "train.trainer")
+    assert trainer.params["sharding"] is True
+    averaged = Graph.from_dict(_design(gpus=4, mixed_precision=True, ema_decay=0.99))
+    fixed = fixes._fit_training_memory(averaged)                 # sharding keeps no EMA
+    assert not fixed or fixed[0] != "Shard the model"
+
+
+@pytest.mark.slow
+def test_quantization_aware_training_feeds_the_int8_export(tmp_path):
+    pytest.importorskip("torch")
+    pytest.importorskip("executorch")
+    pytest.importorskip("torchao")
+    from ai_made_easy.core.deploy.package import build_package
+    from ai_made_easy.core.runner.manager import RunManager
+    from ai_made_easy.core.runs.history import RunHistory
+
+    mgr = RunManager(RunHistory(tmp_path / "runs"))
+    run_id = mgr.start(Graph.from_dict(_design(qat_epochs=2)), "pytorch")
+    status = mgr.wait(run_id, 600)
+    assert status["state"] == "finished", mgr.history.get(run_id).error[-2000:]
+    run = mgr.history.path(run_id)
+    logs = "\n".join(mgr.get(run_id).logs)
+    assert "quantization-aware epoch 2/2" in logs and "int8 (quantization-aware) test:" in logs
+    assert (run / "qat_int8.pt2").is_file()
+    metrics = json.loads((run / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["int8_accuracy"] > 0.5
+    result = build_package(run, tmp_path / "pkg", formats=("executorch_int8",))
+    entry = result.formats["executorch_int8"]
+    assert entry["ok"], entry
+    assert "quantization-aware trained" in entry["note"]
+
+
+_QAT_FAILS_LATE = ("import torch\n"
+                   "def broken(*args, **kwargs):\n"
+                   "    raise RuntimeError('disk full')\n"
+                   "torch.export.save = broken")
+
+
+@pytest.mark.slow
+def test_quantization_aware_training_failing_late_keeps_the_float_results(tmp_path):
+    """QAT is optional: a failure after fine-tuning (here saving the program) is reported
+    and the run still writes its metrics."""
+    pytest.importorskip("torch")
+    pytest.importorskip("executorch")
+    pytest.importorskip("torchao")
+    out = _ok(_run(tmp_path, _script(_design(qat_epochs=1), tmp_path), _QAT_FAILS_LATE))
+    assert "quantization-aware training skipped: RuntimeError: disk full" in out
+    metrics = json.loads((tmp_path / "metrics.json").read_text(encoding="utf-8"))
+    assert "accuracy" in metrics and "int8_accuracy" not in metrics
+    assert not (tmp_path / "qat_int8.pt2").exists()
+
+
+def test_quantization_aware_training_skips_what_it_cant_quantize():
+    from ai_made_easy.core.training.generate import generate_training
+
+    design = _design(qat_epochs=1)
+    loss = next(n for n in design["nodes"] if n["id"] == "loss")
+    loss.update(type="train.loss_arcface", params={"classes": 3})
+    source = generate_training(Graph.from_dict(design), "pytorch")
+    assert "QAT_EPOCHS = 0" in source
+    assert "quantization-aware training is for models with one input and output" in source
+
+
+_COPIES = ("import copy\n"
+           "import torch\n"
+           "model = m.Tiny()\n"
+           "assert m.checkpoint_layers(model) > 0\n"
+           "twin = copy.deepcopy(model)\n"
+           "with torch.no_grad():\n"
+           "    for p in twin.parameters():\n"
+           "        p.zero_()\n"
+           "x = torch.randn(4, 16)\n"
+           "for mode in ('train', 'eval'):\n"
+           "    getattr(twin, mode)(); getattr(model, mode)()\n"
+           "    assert torch.equal(twin(x), torch.zeros(4, 3)), mode   # its own (zero) weights\n"
+           "    assert not torch.equal(model(x), torch.zeros(4, 3)), mode\n"
+           "print('copies run their own layers')\n"
+           "raise SystemExit(0)")
+
+
+def test_a_copy_of_a_checkpointed_model_runs_its_own_layers(tmp_path):
+    """EMA, SWA and quantization-aware training copy the model: the copy's checkpointing
+    wrappers must call the copy's layers, not the original's."""
+    pytest.importorskip("torch")
+    script = _script(_design(gradient_checkpointing=True), tmp_path)
+    assert "copies run their own layers" in _ok(_run(tmp_path, script, _COPIES))
+
+
 # ------------------------------------------------------------ fixed along the way
 _CUT_SHORT = ("import pathlib\n"
               "real = pathlib.Path.write_text\n"
@@ -266,3 +417,40 @@ def test_a_run_stopped_while_saving_still_resumes(tmp_path, framework):
     cut = _run(tmp_path, _script(_resumable_design(), tmp_path, framework), _CUT_SHORT)
     assert cut.returncode != 0 and "stopped while saving" in cut.stderr, cut.stderr[-2000:]
     assert json.loads((tmp_path / "resume.json").read_text(encoding="utf-8"))["epoch"] == 2
+
+
+_STOP_BETWEEN = ("import os, pathlib, signal\n"
+                 "real = pathlib.Path.replace\n"
+                 "saved = []\n"
+                 "def replace(self, target):\n"
+                 "    if pathlib.Path(target).name in ('resume.pt', 'resume.weights.h5'):\n"
+                 "        saved.append(1)\n"
+                 "        if len(saved) == 3:\n"
+                 "            os.kill(os.getpid(), signal.SIGTERM)   # a stop between the files\n"
+                 "    return real(self, target)\n"
+                 "pathlib.Path.replace = replace")
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform == "win32", reason="a stop there can't be held (TerminateProcess)")
+@pytest.mark.parametrize("framework", ["pytorch", "keras"])
+def test_a_stop_between_the_saved_files_waits_for_the_last(tmp_path, framework):
+    """The saved state and resume.json describe the same epoch: a stop that arrives
+    between them waits until both are in place, so the app says the epoch the run resumes
+    after."""
+    import pickle
+
+    from test_v39_features import _resumable_design
+
+    if framework == "keras":
+        keras = pytest.importorskip("keras")
+        if keras.backend.backend() != "torch":
+            pytest.skip("checked on the torch backend")
+    torch = pytest.importorskip("torch")
+    stopped = _run(tmp_path, _script(_resumable_design(), tmp_path, framework), _STOP_BETWEEN)
+    assert stopped.returncode == -15, stopped.stderr[-2000:]       # stopped, by the SIGTERM
+    assert json.loads((tmp_path / "resume.json").read_text(encoding="utf-8"))["epoch"] == 3
+    if framework == "pytorch":
+        assert torch.load(tmp_path / "resume.pt", weights_only=False)["epoch"] == 3
+    else:
+        assert pickle.loads((tmp_path / "resume.extra.pkl").read_bytes())["epoch"] == 3

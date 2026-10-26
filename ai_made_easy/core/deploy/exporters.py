@@ -100,6 +100,7 @@ class Samples:
     eval_cases: list = field(default_factory=list)
     labels: np.ndarray | None = None
     source: str = "random inputs"
+    qat: Path | None = None   # the run's quantization-aware trained int8 program
 
     def example(self, batch: int = 1) -> tuple:
         """The tracing example: ``batch`` rows for tensor models (2 keeps the batch
@@ -177,12 +178,15 @@ def load_samples(kind: str, folder: Path, *, input_shape=(), integer: bool = Fal
             return graph_samples(*graph)
         return random_graph(features or (int(input_shape[-1]) if input_shape else 8))
     path = Path(folder) / "calibration.npz"
+    qat = Path(folder) / "qat_int8.pt2"
     if path.exists():
         with np.load(path) as data:
             x = data["x"]
             if len(x):
-                return samples_from_arrays(kind, x, data["x_eval"] if "x_eval" in data else None,
-                                           data["y_eval"] if "y_eval" in data else None)
+                found = samples_from_arrays(kind, x, data["x_eval"] if "x_eval" in data else None,
+                                            data["y_eval"] if "y_eval" in data else None)
+                found.qat = qat if qat.exists() else None
+                return found
     if not input_shape:
         raise Skipped("the model's input shape is unknown")
     return random_samples(kind, input_shape, integer=integer)
@@ -653,7 +657,10 @@ class Exporter:
 
         example = self._tensors(self.samples.example(1))
         model = self.model
-        if int8:
+        qat = int8 and self.framework == "pytorch" and self.samples.qat is not None
+        if qat:   # trained with int8 rounding simulated: its own scales, no calibration
+            model = torch.export.load(str(self.samples.qat)).module()
+        elif int8:
             from executorch.backends.xnnpack.quantizer.xnnpack_quantizer import (
                 XNNPACKQuantizer,
                 get_symmetric_quantization_config,
@@ -675,7 +682,9 @@ class Exporter:
         path = self.out / ("model.int8.pte" if int8 else "model.pte")
         path.write_bytes(lowered.to_executorch().buffer)
         note = "batch size 1"
-        if int8:
+        if qat:
+            note += "; quantization-aware trained"
+        elif int8:
             note += f"; calibrated on {len(self.samples.calibration)} {self.samples.source}"
         try:
             from executorch.runtime import Runtime

@@ -113,8 +113,13 @@ A machine with several GPUs trains on them together when the Trainer's **GPUs** 
 than one (PyTorch, DistributedDataParallel; the batch size is per GPU). It uses as many
 as the machine has, up to that number, on Linux, macOS and Windows (where the processes
 are spawned and talk over gloo), and with k-fold cross-validation and metric-learning
-losses too. **Compile** (`torch.compile`, and Keras's `jit_compile`) and **Gradient
-checkpointing** (less memory, about a third more compute) are on the Trainer too.
+losses too. With **Sharding** on, the weights, gradients and optimizer state are split
+between the GPUs (FSDP) instead of copied to each, so a model too big for one GPU
+trains; the budget counts each GPU's share and offers sharding when a design doesn't
+fit. Sharded runs don't save resume state. **Compile** (`torch.compile`, and Keras's
+`jit_compile`) and **Gradient checkpointing** (less memory, about a third more compute)
+are on the Trainer too, and **Precision** picks mixed precision's format: bfloat16
+needs no loss scaling (CUDA GPUs from Ampere on).
 
 ## Kaggle
 

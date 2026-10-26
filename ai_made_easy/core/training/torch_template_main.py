@@ -23,6 +23,74 @@ def _inputs(loader: DataLoader, limit: int) -> tuple:
     return x[:keep], y[:keep]
 
 
+class Frozen(nn.Module):
+    """An exported (quantized) program, called like a model; its own train() / eval()
+    are off limits, so it isn't registered as a submodule."""
+
+    def __init__(self, program) -> None:  # noqa: ANN001
+        super().__init__()
+        object.__setattr__(self, "program", program)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.program(x)
+
+
+def quantization_aware(model: nn.Module, loss_fn, train_loader: DataLoader,
+                       test_loader: DataLoader) -> dict:
+    """Fine-tune a copy with int8 rounding simulated (QAT, for XNNPACK: ExecuTorch's int8
+    export), save the quantized program (qat_int8.pt2) and score it on the test data."""
+    try:
+        from executorch.backends.xnnpack.quantizer.xnnpack_quantizer import (
+            XNNPACKQuantizer,
+            get_symmetric_quantization_config,
+        )
+        from torchao.quantization.pt2e import (
+            move_exported_model_to_eval,
+            move_exported_model_to_train,
+        )
+        from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_qat_pt2e
+    except ImportError as exc:
+        print(f"quantization-aware training skipped: it needs the export extra ({exc})")
+        return {}
+    cpu = torch.device("cpu")
+    model = copy.deepcopy(model).to(cpu).eval()
+    loss_fn = copy.deepcopy(loss_fn).to(cpu) if hasattr(loss_fn, "to") else loss_fn  # the run's stays
+    example = next(iter(train_loader))[0][:2].to(cpu)
+    batch = torch.export.Dim("batch", min=1)
+    try:
+        captured = torch.export.export(model, (example,), dynamic_shapes=({0: batch},))
+        quantizer = XNNPACKQuantizer()
+        quantizer.set_global(get_symmetric_quantization_config(is_qat=True))
+        prepared = prepare_qat_pt2e(captured.module(), quantizer)
+    except Exception as exc:  # noqa: BLE001 — not every model can be captured whole
+        print(f"quantization-aware training skipped: the model can't be captured for "
+              f"int8 ({type(exc).__name__}: {str(exc)[:200]})")
+        return {}
+    optimizer = torch.optim.Adam(prepared.parameters(), lr=1e-4)   # a gentle fine-tune
+    for epoch in range(1, QAT_EPOCHS + 1):
+        move_exported_model_to_train(prepared)
+        running, seen = 0.0, 0
+        for xb, yb in train_loader:
+            out, target = adapt(prepared(xb.to(cpu)), yb.to(cpu))
+            loss = loss_fn(out, target)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            running += loss.item() * len(xb)
+            seen += len(xb)
+        print(f"quantization-aware epoch {epoch}/{QAT_EPOCHS} "
+              f"train_loss={running / max(seen, 1):.4f}", flush=True)
+    move_exported_model_to_eval(prepared)
+    quantized = convert_pt2e(prepared)
+    torch.export.save(torch.export.export(quantized, (example,), dynamic_shapes=({0: batch},)),
+                      "qat_int8.pt2")
+    test_loss, metrics = evaluate(Frozen(quantized), loss_fn, test_loader, cpu)
+    scores = {"loss": test_loss, **{k: v for k, v in metrics.items() if isinstance(v, float)}}
+    print("int8 (quantization-aware) test: " + " ".join(f"{k}={v:.4f}"
+                                                       for k, v in scores.items()))
+    return {f"int8_{k}": v for k, v in scores.items()}
+
+
 def save_calibration(train_loader: DataLoader, test_loader: DataLoader) -> None:
     """A few training inputs (int8 calibration for exports) and labelled test inputs
     (exports are checked against the model on them)."""
@@ -95,6 +163,12 @@ def main() -> None:
     save_inference_state()      # temperature, conformal quantiles, Laplace posterior
 {% endif %}
     print("test: " + " ".join(f"{k}={v:.4f}" for k, v in report.items()))
+    if QAT_EPOCHS:
+        try:
+            test_metrics.update(quantization_aware(model, loss_fn, train_loader, test_loader))
+        except Exception as exc:  # noqa: BLE001 — QAT is optional: keep the float results
+            print(f"quantization-aware training skipped: {type(exc).__name__}: "
+                  f"{str(exc)[:200]}", flush=True)
     final = {**report, **test_metrics, **{f"cv_{m}": v for m, v in cv.items()}}
     Path("metrics.json").write_text(json.dumps(
         {k: v for k, v in final.items() if isinstance(v, (float, list))}, indent=1), encoding="utf-8")

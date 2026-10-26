@@ -12,7 +12,9 @@ Summary can show estimate vs measured once a real run has calibrated them.
   weights, plus saved activations × batch (halved by mixed precision), plus the
   device's runtime overhead. Gradient checkpointing keeps only the output of each
   layer it wraps (weights, no batch norm) plus one such layer's inner values while it
-  is recomputed, and adds a forward pass to each step.
+  is recomputed, and adds a forward pass to each step. Sharding (FSDP) splits the
+  weights, gradients and optimizer state between the GPUs, plus one layer gathered
+  whole (twice, for prefetching).
 * Inference latency (batch 1): compute time at a realistic fraction of the
   device's peak + memory traffic over its bandwidth + a small launch cost per
   kernel (one per block; composite blocks declare ``meta["kernels"]``).
@@ -166,6 +168,8 @@ class Estimate:
     mixed_precision: bool = False
     accumulation_steps: int = 1
     checkpointing: bool = False     # the Trainer's gradient checkpointing
+    gpus: int = 1                   # GPUs training together (each holds its batch)
+    sharded: bool = False           # the Trainer's sharding (FSDP) across them
     optimizer_states: int = 2
     layers: list[LayerCost] = field(default_factory=list)
     device: Device | None = None
@@ -211,12 +215,18 @@ class Estimate:
         weights = self.params * 4 + (self.params * 2 if amp else 0)  # fp16 copy under AMP
         grads = self.trainable_params * 4
         states = self.trainable_params * 4 * self.optimizer_states
+        if self.sharded and self.gpus > 1:   # each GPU keeps its share, and gathers one
+            weights, grads, states = (b / self.gpus for b in (weights, grads, states))
+            weights += 2 * max((layer.params for layer in self.layers), default=0) * 4
         saved = self.activations
         if self.checkpointing:
             saved = min(saved, self.checkpointed_activations())
         acts = saved * batch * (2 if amp else 4) * SAVED_ACTIVATION_FACTOR
         overhead = (self.device.overhead_gb if self.device else 0.0) * GB
-        return int(weights + grads + states + acts + overhead)
+        total = weights + grads + states + acts
+        if self.sharded and self.gpus > 1:   # each GPU holds the whole weights until they split
+            total = max(total, self.params * 4)
+        return int(total + overhead)
 
     def inference_memory_bytes(self) -> int:
         peak = max((layer.activations for layer in self.layers), default=0)
@@ -406,6 +416,8 @@ def _apply_training_settings(graph, est: Estimate) -> None:  # noqa: ANN001
             est.mixed_precision = bool(p.get("mixed_precision"))
             est.accumulation_steps = int(p.get("accumulation_steps") or 1)
             est.checkpointing = bool(p.get("gradient_checkpointing"))
+            est.gpus = int(p.get("gpus") or 1)
+            est.sharded = bool(p.get("sharding")) and est.gpus > 1
         elif node.type_id == "prep.dataloader":
             batch = int(node.resolved_params().get("batch_size") or 0)
             if batch:
