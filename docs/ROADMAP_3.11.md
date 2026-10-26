@@ -20,8 +20,8 @@
   an epoch ends, training restarts without it, from the weights and optimizer state it
   had before. **Done.**
 - **OpenVINO on ARM.** It is checked on macOS's ARM CPUs too, in its accuracy mode:
-  - **Tolerance:** within 1e-3 there (its ARM kernels drift up to 7e-4 in float32), and
-    within 1e-4 on x86.
+  - **Tolerance:** within 1e-2 there, because its ARM kernels drift even in float32: up to
+    5.3e-3 over Mamba-2's scan, in 200 random initialisations. On x86 it's within 1e-4.
   - **Retention:** its group norm was rewritten so OpenVINO can run it, with
     bit-identical outputs and gradients. The 3.10 rule against exporting it is gone.
 
