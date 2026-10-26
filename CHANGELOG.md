@@ -1,5 +1,55 @@
 # Changelog
 
+## 3.11.0
+
+Several GPUs on every platform, bigger models (bfloat16, sharding, quantization-aware
+training), fairness fixes, GGUF export and "what would change the prediction". 762
+blocks, 72 recipes. See [docs/ROADMAP_3.11.md](docs/ROADMAP_3.11.md) for what is in
+this release.
+
+### Added
+- **Several GPUs on Windows**, and with k-fold cross-validation and metric-learning
+  losses on every platform. A failing process stops the run instead of leaving the
+  others waiting.
+- **Keras compiles** (Trainer `compile` → `jit_compile`). If compiling fails, training
+  restarts without it, from where it began.
+- **bfloat16** (Trainer `precision`), with no loss scaling.
+- **Sharded training** (Trainer `sharding`): FSDP splits the weights, gradients and
+  optimizer state between the GPUs. The memory budget counts it, and the memory fix
+  offers it.
+- **Quantization-aware training** (Trainer `qat_epochs`): an int8-aware fine-tune whose
+  program the ExecuTorch int8 export uses.
+- **Group weights** (Class Balancing): rows are weighted so a group column says nothing
+  about the class. PyTorch, Keras and classic models.
+- **A threshold per group** for binary classifiers in Results by group: equal
+  true-positive rates, with every group's rates before and after on rows the thresholds
+  weren't fitted on. Saved as `group_thresholds.json`.
+- **GGUF export** (`gguf` extra) of Llama-style language models for llama.cpp, Ollama and
+  LM Studio, with their tokenizer. Checked against PyTorch with llama-cpp-python.
+- **What would change the prediction** (Try it, both apps;
+  `POST /api/runs/{id}/counterfactuals`; the MCP tool `what_would_change`): the
+  smallest edits to a table row that change the model's answer.
+- **OpenVINO on ARM** CPUs, checked on macOS.
+
+### Changed
+- `core/api.py`, `core/training/catalog.py` and `cli.py` are now packages, split by area
+  (every import works as before).
+- OpenVINO exports compile in their accuracy mode. Retention's group norm was rewritten
+  so OpenVINO runs it (identical results).
+
+### Fixed
+- A resumed SSH or Colab run no longer replays the stopped attempt's events and ends at
+  once (the previous attempt's progress files are removed before it starts).
+- With gradient checkpointing, EMA's and SWA's averaged models were scored with the
+  live weights; copies of a checkpointed model now run their own layers.
+- The memory fix no longer offers sharding with EMA or SWA.
+- A run stopped while it saved could not resume. A stop could cut `resume.json` short, or
+  leave it one epoch behind the saved state. The files are now written first, then moved
+  into place together, with the stop held until the last.
+- Closing the desktop app while a data profile was still running could crash it.
+- Several processes on one machine meet through a file instead of a TCP port. Connecting
+  could take minutes on macOS, and needed a free port.
+
 ## 3.10.0
 
 Resume Keras runs and runs on other machines, train on several GPUs, compile and
