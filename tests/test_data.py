@@ -395,6 +395,34 @@ def ctx(app, isolated_home):
     win.deleteLater()
 
 
+def test_work_still_running_when_the_window_closes_does_not_emit(app, tmp_path):
+    """Closing the window shuts the service down and then deletes it: a profile still
+    running must not emit on the deleted object (that crashed the app)."""
+    import threading
+
+    import shiboken6
+
+    from ai_made_easy.ui.services.data_service import DataService
+
+    service = DataService()
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def slow(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        started.set()
+        release.wait(10)
+        return "profile"
+
+    service.cache.profile = slow
+    service.request("data.csv", {"path": str(tmp_path / "t.csv")})
+    future = service._futures[-1]
+    future.add_done_callback(lambda f: finished.set())
+    assert started.wait(10)
+    service.shutdown()
+    shiboken6.delete(service)          # what deleteLater does once the window has closed
+    release.set()
+    assert finished.wait(10) and future.exception() is None
+
+
 def test_data_service_and_page(app, tmp_path):
     from ai_made_easy.ui.features.data_workspace import DataPage
     from ai_made_easy.ui.services.data_service import DataService
