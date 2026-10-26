@@ -476,25 +476,6 @@ def test_group_weights_train_in_every_framework(tmp_path, framework):
     each region are positive as often as all of them."""
     import numpy as np
 
-
-# ------------------------------------------------------------ fixed along the way
-_CUT_SHORT = ("import pathlib\n"
-              "real = pathlib.Path.write_text\n"
-              "def write_text(self, data, *args, **kwargs):\n"
-              "    if self.name.startswith('resume.json') and '\"epoch\": 3' in data:\n"
-              "        real(self, data[:5], *args, **kwargs)\n"
-              "        raise SystemExit('stopped while saving')\n"
-              "    return real(self, data, *args, **kwargs)\n"
-              "pathlib.Path.write_text = write_text")
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("framework", ["pytorch", "keras"])
-def test_a_run_stopped_while_saving_still_resumes(tmp_path, framework):
-    """A stop in the middle of writing resume.json (a fast run writes it many times a
-    second) leaves the previous epoch's, whole, so the run still resumes."""
-    from test_v39_features import _resumable_design
-
     if framework == "keras":
         keras = pytest.importorskip("keras")
         if keras.backend.backend() != "torch":
@@ -860,6 +841,29 @@ def test_the_desktop_describes_changes():
                                  "14 edited rows checked."]
 
 
+# ------------------------------------------------------------ fixed along the way
+_CUT_SHORT = ("import pathlib\n"
+              "real = pathlib.Path.write_text\n"
+              "def write_text(self, data, *args, **kwargs):\n"
+              "    if self.name.startswith('resume.json') and '\"epoch\": 3' in data:\n"
+              "        real(self, data[:5], *args, **kwargs)\n"
+              "        raise SystemExit('stopped while saving')\n"
+              "    return real(self, data, *args, **kwargs)\n"
+              "pathlib.Path.write_text = write_text")
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("framework", ["pytorch", "keras"])
+def test_a_run_stopped_while_saving_still_resumes(tmp_path, framework):
+    """A stop in the middle of writing resume.json (a fast run writes it many times a
+    second) leaves the previous epoch's, whole, so the run still resumes."""
+    from test_v39_features import _resumable_design
+
+    if framework == "keras":
+        keras = pytest.importorskip("keras")
+        if keras.backend.backend() != "torch":
+            pytest.skip("checked on the torch backend")
+    else:
         pytest.importorskip("torch")
     cut = _run(tmp_path, _script(_resumable_design(), tmp_path, framework), _CUT_SHORT)
     assert cut.returncode != 0 and "stopped while saving" in cut.stderr, cut.stderr[-2000:]
