@@ -189,7 +189,17 @@ named `aime-runs`.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `gpu` | `T4` | `none`, `T4`, `L4`, `A10G`, `A100`, `A100-80GB` or `H100` |
+| `gpu_count` | `1` | GPUs in the sandbox, 1 to 8. Set the Trainer's **GPUs** to use them |
 | `timeout_minutes` | `240` | the longest a run may take |
+
+For example, `aime backends add pair --kind modal -s gpu=A100 -s gpu_count=2`; then a design whose
+Trainer asks for 2 GPUs trains on both (DistributedDataParallel, or sharded).
+
+**Checking several GPUs.** The repository's *GPU check* workflow (Actions → GPU check →
+Run workflow) trains a small network on 2 Modal GPUs three ways: DistributedDataParallel
+in float16, sharded in float16, and sharded in bfloat16. It needs the repository secrets
+`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. To run it from your own machine, signed in to
+Modal, use `python scripts/gpu_check.py --gpu L4`.
 
 ## Docker
 

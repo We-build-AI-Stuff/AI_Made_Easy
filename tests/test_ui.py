@@ -202,6 +202,17 @@ def test_delete_selection_and_select_all(ctx, app):
     assert len(ctx.canvas.selected_ids()) == before - 1
 
 
+def test_switching_themes_keeps_the_style(ctx, app):
+    """Setting the style again deletes the old one, which widgets still alive (another
+    window waiting to be deleted) may use: that crashed opening a second window."""
+    import shiboken6
+
+    before = app.style()
+    ctx.act_theme_light()
+    ctx.act_theme_dark()
+    assert shiboken6.isValid(before) and app.style() is before
+
+
 def test_theme_switch_updates_canvas_tokens(ctx, app):
     from ai_made_easy.ui.canvas import painter
 

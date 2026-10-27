@@ -365,6 +365,26 @@ def test_modal_run_streams_live(manager, monkeypatch):
     assert list(manager.history.path(run_id).glob("*.pt"))
 
 
+def test_modal_asks_for_several_gpus(manager, monkeypatch):
+    asked = []
+
+    class Counting(FakeModal):
+        def run(self, *args, gpu, **kwargs):  # noqa: ANN002, ANN003
+            asked.append(gpu)
+            yield from super().run(*args, gpu=gpu, **kwargs)
+
+    monkeypatch.setattr(ModalBackend, "client_factory", Counting)
+    backends.save("modal-pair", "modal", gpu="A100", gpu_count=2)
+    run_id = manager.start(_design(epochs=1), on="modal-pair")
+    result = _final(manager, run_id)
+    assert asked == ["A100:2"] and result["record"].status == "finished"
+    assert result["record"].remote["accelerator"] == {"gpu": "A100:2", "count": 2,
+                                                      "device": "a100_40"}
+    for bad in ({"gpu_count": 9}, {"gpu_count": "two"}, {"gpu": "none", "gpu_count": 2}):
+        with pytest.raises(backends.BackendError, match="gpu_count must be 1 to 8"):
+            ModalBackend("m", **bad)
+
+
 # ------------------------------------------------------------------ Colab
 
 def _run_notebook(book: dict, drive: Path) -> None:
@@ -546,3 +566,24 @@ def test_real_kaggle_kernel(manager):
     assert result["record"].status == "finished", result["record"].error
     assert [e["epoch"] for e in result["epochs"]] == [1, 2]
     assert result["record"].final_metrics
+
+
+def test_the_gpu_check_trains_valid_designs_and_reports():
+    """scripts/gpu_check.py runs on real GPUs only by hand; here its designs generate
+    the training each case asks for, and its report renders."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import gpu_check
+
+    from ai_made_easy.core.graph import Graph
+    from ai_made_easy.core.training.generate import generate_training
+
+    for name, (settings, _expect) in gpu_check.CASES.items():
+        graph = Graph.from_dict(gpu_check.design(settings))
+        assert not [i for i in graph.validate() if i.severity == "error"], name
+        source = generate_training(graph, "pytorch")
+        assert "GPUS = 2" in source and f"SHARDED = {settings['sharding']}" in source
+        assert f'PRECISION = "{settings["precision"]}"' in source
+    text = gpu_check.summary({"gpu": "L4", "date": "2026-10-27", "results": {
+        "ddp_float16": {"ok": True, "accuracy": 0.91, "why": ""},
+        "sharded_bfloat16": {"ok": None, "why": "T4 has no bfloat16"}}})
+    assert "| ddp_float16 | passed | 0.910 |  |" in text and "| sharded_bfloat16 | skipped" in text

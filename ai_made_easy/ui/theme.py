@@ -233,7 +233,9 @@ class ThemeService:
 
         self._active = name if name in THEMES else DEFAULT_THEME
         t = THEMES[self._active]
-        app.setStyle("Fusion")
+        if not app.property("aime_fusion"):   # once: a new style deletes the old one,
+            app.setStyle("Fusion")            # which widgets still alive may use
+            app.setProperty("aime_fusion", True)
         palette = QtGui.QPalette()
         for role, key in ((QtGui.QPalette.ColorRole.Window, "BG"),
                           (QtGui.QPalette.ColorRole.WindowText, "TEXT"),
