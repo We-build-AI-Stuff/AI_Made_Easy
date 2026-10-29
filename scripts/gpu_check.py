@@ -73,12 +73,17 @@ def check(gpu: str, cases: list[str], timeout: float) -> dict:
             results[name] = {"ok": None, "why": f"{gpu} has no bfloat16"}
             continue
         run_id = mgr.start(Graph.from_dict(design(settings)), on="gpu-check")
-        state = mgr.wait(run_id, timeout)["state"]
+        problems = []
+        try:
+            state = mgr.wait(run_id, timeout)["state"]
+        except TimeoutError:   # stop it, so the sandbox doesn't keep the GPUs
+            mgr.stop(run_id)
+            state = "timed out"
+            problems.append(f"it did not finish within {timeout:.0f}s; stopped")
         record = mgr.history.get(run_id)
         logs = list(mgr.get(run_id).logs)
         accuracy = (record.final_metrics or {}).get("accuracy")
-        problems = []
-        if state != "finished":
+        if state not in ("finished", "timed out"):
             problems.append(f"the run {state}: {record.error or logs[-5:]}")
         if not any(expect in line for line in logs):
             problems.append(f"no {expect!r} in its log")
@@ -114,7 +119,7 @@ def main() -> int:
     if unknown:
         parser.error(f"unknown cases {unknown}")
     report = {"gpu": args.gpu, "count": 2,
-              "date": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d"),
+              "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
               "results": check(args.gpu, cases, args.timeout)}
     Path(args.out).write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(summary(report))

@@ -86,11 +86,28 @@ class ModalClient:
             self.sandbox.terminate()
 
 
+MOST_GPUS = {"A10G": 4}   # GPUs per sandbox; the others take up to 8
+
+
+def _count(value) -> int:  # noqa: ANN001
+    """gpu_count as given: absent means 1; anything but a whole number is 0 (rejected),
+    so 2.9 or 0 never quietly become another count."""
+    if value is None or value == "":
+        return 1
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    return int(text) if text.isdigit() else 0
+
+
 class ModalBackend(RemoteBackend):
     kind = "modal"
     options_help = {
         "gpu": f"one of {', '.join(GPUS)} (default T4)",
-        "gpu_count": "GPUs in the sandbox, 1 to 8 (default 1); the Trainer's GPUs uses them",
+        "gpu_count": "GPUs in the sandbox, 1 to 8 (A10G: 4; default 1); the Trainer's GPUs "
+                     "uses them",
         "timeout_minutes": "the longest a run may take (default 240)",
     }
     client_factory = ModalClient
@@ -100,12 +117,11 @@ class ModalBackend(RemoteBackend):
         self.gpu = str(options.get("gpu") or "T4")
         if self.gpu not in GPUS:
             raise BackendError(f"Modal gpu must be one of {', '.join(GPUS)}")
-        try:
-            self.gpu_count = int(options.get("gpu_count") or 1)
-        except (TypeError, ValueError):
-            self.gpu_count = 0
-        if not 1 <= self.gpu_count <= 8 or (self.gpu == "none" and self.gpu_count > 1):
-            raise BackendError("Modal gpu_count must be 1 to 8, with a gpu")
+        self.gpu_count = _count(options.get("gpu_count"))
+        most = MOST_GPUS.get(self.gpu, 8)
+        if not 1 <= self.gpu_count <= most or (self.gpu == "none" and self.gpu_count > 1):
+            raise BackendError(f"Modal gpu_count must be a whole number from 1 to {most}"
+                               + (" (A10G machines have 4)" if most == 4 else ", with a gpu"))
         self.timeout = int(float(options.get("timeout_minutes", 240)) * 60)
 
     def gpu_spec(self) -> str:
