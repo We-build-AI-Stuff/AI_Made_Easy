@@ -1,5 +1,43 @@
 # Changelog
 
+## 3.12.0
+
+More language models export to GGUF (GPTs, RWKV-7, fine-tuned Hugging Face models, 8- and
+4-bit), and the fairness thresholds of 3.11 now decide predictions in Try it and in
+deployed packages. 763 blocks, 72 recipes. See [docs/ROADMAP_3.12.md](docs/ROADMAP_3.12.md)
+for what is in this release.
+
+### Added
+- **GGUF for GPTs** (llama.cpp's `gpt2`): the Tiny GPT recipe exports, checked within 5e-3
+  (llama.cpp computes GELU through a float16 table).
+- **RWKV-7 Stack block** (PyTorch and Keras), following llama.cpp's `rwkv7` graph; Tiny RWKV
+  uses it and exports to GGUF (about 1e-5 from PyTorch).
+- **`gguf_q8_0` and `gguf_q4_0`**: weight matrices in llama.cpp's 8- and 4-bit block formats,
+  with how often the top next token still agrees.
+- **Fine-tuned Hugging Face models to GGUF**: a LoRA fine-tune of a Llama, Qwen2, Phi-3 or
+  Gemma 3 model, merged into its base model and converted as llama.cpp's converter does,
+  tokenizer included; checked in llama.cpp against transformers. `aime gguf`,
+  `GET /api/runs/{id}/gguf`, the MCP tool `gguf_run`, and **Deploy** in both apps.
+- **Thresholds per group in use**: **Use These Thresholds** in Results by group makes the
+  run's Try it and deployment packages decide each row with its group's threshold (rows
+  carry the group column); **Stop Using Them** goes back to 0.5. API, REST, MCP, both apps.
+- **What would change each row of a file**: Try it on a CSV can add the smallest change to
+  another class (the first 500 rows).
+- **Several GPUs on Modal** (`gpu_count`), and a **GPU check** workflow, started by hand,
+  that trains on 2 Modal GPUs: DistributedDataParallel and sharded, float16 and bfloat16.
+
+### Changed
+- Tiny RWKV uses RWKV-7 (the RWKV-4 block stays).
+
+### Fixed
+- Tiny RWKV's final LayerNorm normalized over the whole sequence (its file predates
+  per-token LayerNorm), so training saw later tokens. A rule now flags a LayerNorm over
+  every position in a language model, with a fix.
+- The desktop app could crash opening a window while another was closing: the Qt style
+  was set again, deleting the one a closing window still used.
+- Modal's `gpu_count` rejects counts it would have changed (0, 2.9) and A10G above 4.
+- pytest 9 and torch 2.15: a nested `approx`, and the encoder-decoder's mixed masks.
+
 ## 3.11.0
 
 Several GPUs on every platform, bigger models (bfloat16, sharding, quantization-aware

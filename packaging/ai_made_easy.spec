@@ -39,4 +39,4 @@ if sys.platform == "darwin":
     app = BUNDLE(coll, name="AI Made Easy.app", icon=str(icon),
                  bundle_identifier="dev.aimadeeasy.designer",
                  info_plist={"NSHighResolutionCapable": True,
-                             "CFBundleShortVersionString": "3.11.0"})
+                             "CFBundleShortVersionString": "3.12.0"})
