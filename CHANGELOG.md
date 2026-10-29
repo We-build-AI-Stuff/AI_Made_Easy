@@ -16,7 +16,8 @@ for what is in this release.
   with how often the top next token still agrees.
 - **Fine-tuned Hugging Face models to GGUF**: a LoRA fine-tune of a Llama, Qwen2, Phi-3 or
   Gemma 3 model, merged into its base model and converted as llama.cpp's converter does,
-  tokenizer included; checked in llama.cpp against transformers. `aime gguf`,
+  tokenizer included; checked in llama.cpp against transformers when `llama-cpp-python` is
+  installed. `aime gguf`,
   `GET /api/runs/{id}/gguf`, the MCP tool `gguf_run`, and **Deploy** in both apps.
 - **Thresholds per group in use**: **Use These Thresholds** in Results by group makes the
   run's Try it and deployment packages decide each row with its group's threshold (rows
@@ -28,6 +29,7 @@ for what is in this release.
 
 ### Changed
 - Tiny RWKV uses RWKV-7 (the RWKV-4 block stays).
+- The `gguf` extra needs gguf 0.17.1 or newer (RWKV-7 and Gemma 3 metadata).
 
 ### Fixed
 - Tiny RWKV's final LayerNorm normalized over the whole sequence (its file predates

@@ -67,10 +67,12 @@ boilerplate. It runs on the desktop or in the browser.
   - **GGUF:** GPTs and the new **RWKV-7 Stack** export to GGUF as well as Llama-style
     decoders, in float32 or llama.cpp's 8- and 4-bit formats. LoRA fine-tunes of Llama,
     Qwen2, Phi-3 and Gemma 3 models export too, merged into their base model. Every file
-    is checked against PyTorch or transformers in llama.cpp.
+    is checked against PyTorch or transformers in llama.cpp when `llama-cpp-python` is
+    installed; the export report says how each file was checked.
   - **Thresholds per group, in use:** Try it and deployment packages decide each row's
     class with its group's threshold.
-  - **A whole file:** Try it on a CSV can add each row's smallest change to another class.
+  - **A whole file:** Try it on a CSV can add each row's smallest change to another class,
+    for its first 500 rows.
   - **Several GPUs on Modal** (A100 × 2, say), and a GPU check workflow that trains on
     them.
 
