@@ -413,6 +413,26 @@ def deploy_run(run_id: str, out_dir: str, formats: list[str] | None = None) -> s
 
 
 @mcp.tool()
+def use_group_thresholds(groups_run_id: str) -> str:
+    """Use the thresholds per group a Results-by-group run fitted (two-class classifiers)
+    for the run it scored: its Try it and deployment packages then decide each row's class
+    with its group's threshold (requests include the group column)."""
+    try:
+        return json.dumps(api.use_group_thresholds(groups_run_id), default=str)
+    except (api.ApiError, KeyError) as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def stop_group_thresholds(run_id: str) -> str:
+    """Stop using thresholds per group for a run: one threshold (0.5) for every row."""
+    try:
+        return json.dumps(api.stop_group_thresholds(run_id), default=str)
+    except (api.ApiError, KeyError) as exc:
+        return _err(exc)
+
+
+@mcp.tool()
 def gguf_run(run_id: str, out_dir: str, quant: str = "") -> str:
     """A finished LoRA fine-tune of a Hugging Face model (Llama, Qwen2, Phi-3 or Gemma 3) as
     one GGUF file for llama.cpp, Ollama and LM Studio: the adapter merged into the base model,

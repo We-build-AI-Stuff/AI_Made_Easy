@@ -39,7 +39,10 @@ def describe_prediction(pred: dict) -> str:
     if isinstance(probs, dict) and probs:
         top = sorted(probs.items(), key=lambda kv: -kv[1])[:5]
         lines = [f"{pred.get('label')}" + (f"  ({pred['confidence'] * 100:.1f}% sure)"
-                                           if isinstance(pred.get("confidence"), float) else "")]
+                                           if isinstance(pred.get("confidence"), float) else "")
+                 + (f"  · decided at {pred['threshold']:.2f} ("
+                    + (f"{pred['group']}'s threshold)" if pred.get("group") else "no group given)")
+                    if isinstance(pred.get("threshold"), (int, float)) else "")]
         lines += [f"  {name:<18} {'█' * max(1, round(p * 30))} {p * 100:.1f}%" for name, p in top]
         return "\n".join(lines)
     return json.dumps(pred, indent=1, default=str)
@@ -88,6 +91,7 @@ class TryDialog(QtWidgets.QDialog):
         self._service = service or api.try_service()
         self.form_info: dict | None = None
         self._fields: dict[str, QtWidgets.QLineEdit] = {}
+        self._group: tuple[str, QtWidgets.QLineEdit] | None = None   # thresholds per group
         self._file: Path | None = None
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -104,6 +108,11 @@ class TryDialog(QtWidgets.QDialog):
         self.explain_box = QtWidgets.QCheckBox("Show where the model looked (Grad-CAM)")
         self.explain_box.setVisible(False)
         layout.addWidget(self.explain_box)
+        self.changes_in_file = QtWidgets.QCheckBox(
+            "When predicting a file, add what would change each prediction (the smallest "
+            "change to another class, for the first 500 rows; slower)")
+        self.changes_in_file.setVisible(False)
+        layout.addWidget(self.changes_in_file)
         results = QtWidgets.QHBoxLayout()
         self.result = QtWidgets.QPlainTextEdit(readOnly=True)
         self.result.setAccessibleName("Prediction")
@@ -191,6 +200,15 @@ class TryDialog(QtWidgets.QDialog):
                 field.setAccessibleName(col)
                 self._fields[col] = field
                 self.form.addRow(col, field)
+            used = info.get("group_thresholds")
+            if used and used["column"] not in columns:   # the model may not read the group
+                field = QtWidgets.QLineEdit()
+                field.setAccessibleName(used["column"])
+                cuts = ", ".join(f"{g} {t:.2f}" for g, t in used["thresholds"].items())
+                field.setToolTip(f"Its group's threshold decides the class ({cuts}; "
+                                 f"otherwise {used.get('default', 0.5):.2f})")
+                self._group = (used["column"], field)
+                self.form.addRow(f"{used['column']} (group)", field)
         elif kind in _TEXT_KINDS:
             self.text = QtWidgets.QPlainTextEdit()
             self.text.setAccessibleName("Text")
@@ -208,6 +226,8 @@ class TryDialog(QtWidgets.QDialog):
             self.form.addRow("Inputs (JSON list)", self.json)
         self.predict_btn.setEnabled(True)
         self.explain_box.setVisible(bool(info.get("can_explain")))
+        self.changes_in_file.setVisible(kind == "records" and bool(info.get("batch_formats"))
+                                        and info.get("task") != "regression")
         self.file_btn.setEnabled(bool(info.get("batch_formats")))
         if info.get("batch_formats"):
             self.file_btn.setToolTip(f"Every input of a {info['batch_formats']} file at once; "
@@ -229,7 +249,10 @@ class TryDialog(QtWidgets.QDialog):
     def inputs(self) -> list:
         kind = (self.form_info or {}).get("input_kind", "")
         if self._fields:
-            return [{c: _value(f.text()) for c, f in self._fields.items()}]
+            row = {c: _value(f.text()) for c, f in self._fields.items()}
+            if self._group is not None and self._group[1].text().strip():
+                row[self._group[0]] = self._group[1].text().strip()
+            return [row]
         if kind in _TEXT_KINDS:
             return [self.text.toPlainText()]
         if kind in _FILE_KINDS:
@@ -357,14 +380,16 @@ class TryDialog(QtWidgets.QDialog):
         background; the result box says when it is done)."""
         self.file_btn.setEnabled(False)
         self.result.setPlainText(f"Predicting every input in {source.name}…")
-        threading.Thread(target=self._ask_file, args=(source, target), daemon=True).start()
+        changes = self.changes_in_file.isVisible() and self.changes_in_file.isChecked()
+        threading.Thread(target=self._ask_file, args=(source, target, changes),
+                         daemon=True).start()
 
-    def _ask_file(self, source: Path, target: Path) -> None:
+    def _ask_file(self, source: Path, target: Path, changes: bool = False) -> None:
         from ai_made_easy.core import tryit
 
         try:
             got = tryit.predict_file(self._service, self._history, self._run_id, source.name,
-                                     source.read_bytes())
+                                     source.read_bytes(), changes)
             target.write_text(got["csv"], encoding="utf-8")
             self._filed.emit({**got, "target": str(target)}, "")
         except Exception as exc:  # noqa: BLE001 — shown in the dialog

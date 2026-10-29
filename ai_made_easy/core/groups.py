@@ -375,9 +375,60 @@ def start(mgr, run_id: str, column: str) -> str:  # noqa: ANN001
     new_id = mgr.start_stage(Graph.from_dict(record.graph),
                              lambda wd: write_script(wd, mgr, run_id, column),
                              framework=record.framework, kind="groups",
-                             project=record.project, tags=["groups"])
+                             project=record.project, parent=run_id, tags=["groups"])
     mgr.history.update(new_id, note=f"Results of {run_id} ({record.name}) by {column!r}")
     return new_id
+
+
+THRESHOLDS = "group_thresholds.json"
+
+
+def _scored(mgr, groups_run: str) -> str:  # noqa: ANN001
+    """The run a Results-by-group run scored."""
+    import re
+
+    record = mgr.history.get(groups_run)
+    if record.kind != "groups":
+        raise GroupsError(f"run {groups_run} is not a Results by group run")
+    if record.parent:
+        return record.parent
+    found = re.match(r"Results of (\S+) ", record.note or "")   # scored before 3.12
+    if found is None:
+        raise GroupsError(f"run {groups_run} doesn't say which run it scored")
+    return found.group(1)
+
+
+def adopt(mgr, groups_run: str) -> dict:  # noqa: ANN001
+    """Use the thresholds per group a Results-by-group run fitted for the run it scored:
+    Try it and its deployment packages decide each row's class with its group's
+    threshold from now on."""
+    source = _scored(mgr, groups_run)
+    fitted = mgr.history.path(groups_run) / THRESHOLDS
+    if not fitted.is_file():
+        raise GroupsError("this result has no thresholds per group: they are fitted for "
+                          "two-class classifiers whose groups have enough positives")
+    result = mgr.history.path(groups_run) / RESULT
+    how = json.loads(result.read_text(encoding="utf-8")).get("how") if result.is_file() else None
+    if how == "quartiles":
+        raise GroupsError("these groups are quartiles of a number, and a row's own value "
+                          "can't be matched to them: score by a column of categories")
+    mgr.history.get(source)   # an unknown run raises here
+    shutil.copy2(fitted, mgr.history.path(source) / THRESHOLDS)
+    return {"run_id": source, "from": groups_run,
+            **json.loads(fitted.read_text(encoding="utf-8"))}
+
+
+def adopted(mgr, run_id: str) -> dict | None:  # noqa: ANN001
+    path = mgr.history.path(run_id) / THRESHOLDS
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
+def drop(mgr, run_id: str) -> dict:  # noqa: ANN001
+    """Stop using thresholds per group: back to 0.5 for every row."""
+    path = mgr.history.path(run_id) / THRESHOLDS
+    had = path.is_file()
+    path.unlink(missing_ok=True)
+    return {"run_id": run_id, "removed": had}
 
 
 def summarize(raw: dict) -> dict:

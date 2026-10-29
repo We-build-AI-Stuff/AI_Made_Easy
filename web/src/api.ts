@@ -2,6 +2,8 @@
 // server's user-facing message.
 import type {
   AutoMLStarted,
+  GroupThresholds,
+  GroupThresholdsUsed,
   Counterfactuals,
   BackendList,
   BackendTest,
@@ -145,10 +147,10 @@ export const api = {
     post<{ predictions: Record<string, unknown>[]; latency_ms: number }>(`/runs/${id}/try`,
                                                                           { inputs, explain }),
   /** Predictions for every input in a file, as CSV text. */
-  tryFile: (id: string, file: File) => {
+  tryFile: (id: string, file: File, changes = false) => {
     const form = new FormData();
     form.append("file", file);
-    return post<string>(`/runs/${id}/try/file`, form);
+    return post<string>(`/runs/${id}/try/file${changes ? "?changes=true" : ""}`, form);
   },
   metrics: (id: string) => get<{ epochs: { epoch: number; metrics: Record<string, number> }[] }>(
     `/runs/${id}/metrics`),
@@ -180,6 +182,12 @@ export const api = {
   resultsByGroup: (id: string, column: string) =>
     post<{ run_id: string }>(`/runs/${id}/groups`, { column }),
   groupResult: (id: string) => get<GroupResult>(`/groups/${id}`),
+  useGroupThresholds: (scoringRun: string) =>
+    post<GroupThresholdsUsed>(`/groups/${scoringRun}/use`, {}),
+  groupThresholds: (runId: string) =>
+    get<{ run_id: string; thresholds: GroupThresholds | null }>(`/runs/${runId}/group-thresholds`),
+  stopGroupThresholds: (runId: string) =>
+    request<{ run_id: string; removed: boolean }>("DELETE", `/runs/${runId}/group-thresholds`),
   // 3.9: resume an interrupted run
   resumeInfo: (id: string) => get<ResumeInfo>(`/runs/${id}/resume`),
   resumeRun: (id: string) => post<{ run_id: string; after_epoch: number }>(`/runs/${id}/resume`, {}),

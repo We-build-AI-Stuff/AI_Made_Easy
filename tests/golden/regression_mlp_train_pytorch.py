@@ -700,6 +700,7 @@ def fit(model: nn.Module, train_loader, val_loader, device, log: bool = True):
 
 # ============================================================= inference
 INFERENCE_FILE = "inference_state.pkl"
+GROUP_THRESHOLDS: dict = {}   # thresholds per group the run adopted (group_thresholds.json)
 
 
 def save_inference_state() -> None:
@@ -715,10 +716,53 @@ def load_inference_state(folder: str | Path = ".") -> None:
     """Restore the state saved by a training run (trusted files only: pickle)."""
     import pickle
 
-    global CLASS_NAMES
+    global CLASS_NAMES, GROUP_THRESHOLDS
     with open(Path(folder) / INFERENCE_FILE, "rb") as fh:
         INFERENCE_STATE.update(pickle.load(fh))
     CLASS_NAMES = INFERENCE_STATE.get("classes")
+    adopted = Path(folder) / "group_thresholds.json"
+    GROUP_THRESHOLDS = json.loads(adopted.read_text(encoding="utf-8")) if adopted.is_file() else {}
+
+
+def group_cut(item, column: str, cuts: dict, default: float) -> tuple[float, str | None]:
+    """A row's group threshold, and the group it was found under. Groups are keyed as
+    training wrote them: str() of the value, "(missing)" for an empty cell; a whole number
+    read as 1.0 finds "1", and 1 finds "1.0". A row without the column gets the default."""
+    if not isinstance(item, dict) or column not in item:
+        return default, None
+    group = item[column]
+    if group is None or (isinstance(group, float) and group != group):
+        keys = ["(missing)"]
+    elif isinstance(group, float) and group.is_integer():
+        keys = [str(group), str(int(group))]
+    elif isinstance(group, int) and not isinstance(group, bool):
+        keys = [str(group), str(float(group))]
+    else:
+        keys = [str(group)]
+    found = next((k for k in keys if k in cuts), None)
+    return (float(cuts[found]), found) if found is not None else (default, keys[0])
+
+
+def with_group_thresholds(results: list[dict], raw: list) -> list[dict]:
+    """A two-class prediction decided by its row's group threshold instead of 0.5, when
+    the run adopted thresholds per group (Results by group). The row carries the group
+    column even when the model doesn't read it; without it the default applies."""
+    if not GROUP_THRESHOLDS:
+        return results
+    column, cuts = GROUP_THRESHOLDS["column"], GROUP_THRESHOLDS["thresholds"]
+    default = float(GROUP_THRESHOLDS.get("default", 0.5))
+    for result, item in zip(results, raw):
+        probs = result.get("probabilities")
+        if not isinstance(probs, dict) or len(probs) != 2:
+            continue
+        cut, group = group_cut(item, column, cuts, default)
+        names = list(probs)
+        p = float(probs[names[1]])
+        best = int(p >= cut)
+        result.update(label=names[best], class_index=best,
+                      confidence=round(p if best else 1 - p, 6), threshold=cut,
+                      group=group)
+    return results
 
 
 def class_name(index: int) -> str:
@@ -808,7 +852,7 @@ def infer(raw: list) -> list[dict]:
         raise RuntimeError("call load_predictor(folder) first")
     device = model_device(_PREDICTOR)
     x = torch.from_numpy(np.ascontiguousarray(prepare_inputs(raw))).to(device)
-    return describe(_PREDICTOR(x).float().cpu().numpy())
+    return with_group_thresholds(describe(_PREDICTOR(x).float().cpu().numpy()), raw)
 
 
 def _inputs(loader: DataLoader, limit: int) -> tuple:

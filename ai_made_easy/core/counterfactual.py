@@ -34,28 +34,41 @@ class CounterfactualError(ValueError):
     """A run or a request the search can't answer."""
 
 
-def _table(record: dict) -> tuple[Path, str]:
-    node = next((n for n in (record.get("graph") or {}).get("nodes", [])
-                 if n.get("type") == "data.csv"), None)
+def _frame(record: dict):  # noqa: ANN202 — a pandas DataFrame
+    """The run's training table: its data.csv file, or its scikit-learn dataset."""
+    import pandas as pd
+
+    nodes = (record.get("graph") or {}).get("nodes", [])
+    node = next((n for n in nodes if n.get("type") in ("data.csv", "data.sklearn")), None)
     if node is None:
         raise CounterfactualError("what would change the prediction is worked out for "
-                                  "models trained on a table (data.csv)")
+                                  "models trained on a table (data.csv) or a scikit-learn "
+                                  "dataset")
     params = node.get("params") or {}
+    if node["type"] == "data.sklearn":
+        from sklearn import datasets
+
+        from ai_made_easy.core.training.data_catalog import SKLEARN
+
+        name = params.get("dataset") or "iris"
+        if name not in SKLEARN:
+            raise CounterfactualError(f"no such scikit-learn dataset: {name}")
+        return getattr(datasets, SKLEARN[name][0])(as_frame=True).frame
     path = Path(params.get("path") or "")
     if not path.is_file():
         raise CounterfactualError(f"the run's table is no longer at {path}: the search "
                                   "tries values from it")
-    return path, params.get("format") or "csv"
-
-
-def candidates(path: Path, fmt: str, columns: list[str]) -> dict:
-    """For each column: the values to try, whether it is numeric, and its spread."""
-    import pandas as pd
-
     readers = {"parquet": pd.read_parquet, "excel": pd.read_excel,
                "tsv": lambda p: pd.read_csv(p, sep="\t"),
                "json": lambda p: pd.read_json(p, lines=str(p).endswith(".jsonl"))}
-    frame = readers.get(fmt, pd.read_csv)(path)
+    return readers.get(params.get("format") or "csv", pd.read_csv)(path)
+
+
+def candidates(frame, columns: list[str]) -> dict:  # noqa: ANN001
+    """For each column of the training table: the values to try, whether it is numeric,
+    and its spread."""
+    import pandas as pd
+
     out = {}
     for name in columns:
         if name not in frame.columns:
@@ -220,7 +233,7 @@ def what_would_change(service, history, run_id: str, row: dict, *,  # noqa: ANN0
         raise CounterfactualError("give one row: {column: value, ...}")
     history.get(run_id)
     record = json.loads((history.path(run_id) / "run.json").read_text(encoding="utf-8"))
-    path, fmt = _table(record)
+    frame = _frame(record)
     worker, meta = tryit._target(service, history, run_id)
     if meta.get("input_kind") != "records":
         raise CounterfactualError("counterfactuals are worked out for models that read "
@@ -234,7 +247,48 @@ def what_would_change(service, history, run_id: str, row: dict, *,  # noqa: ANN0
     unknown = [c for c in locked if c not in names]
     if unknown:
         raise CounterfactualError(f"no such column to lock: {unknown}")
-    columns = candidates(path, fmt, names)
-    out = search(lambda rows: worker.ask(rows, timeout=120), {c: row[c] for c in names},
-                 columns, desired=desired, target=target, locked=locked)
+    columns = candidates(frame, names)
+    # the whole row: a column the model doesn't read (a group's threshold) still applies
+    out = search(lambda rows: worker.ask(rows, timeout=120), dict(row), columns, desired=desired, target=target, locked=locked)
     return {"run_id": run_id, **out}
+
+
+MAX_ROWS = 500   # rows of a file the search runs for (each asks the model dozens of times)
+
+
+def describe_change(found: dict) -> tuple[str, str]:
+    """A search's answer in a few words: (the smallest change, what it predicts then)."""
+    best = (found.get("single") or [None])[0] or found.get("combined")
+    if not best:
+        return "no change found", ""
+    text = "; ".join(f"{c['column']} {c['from']} → {c['to']}" for c in best["changes"])
+    p = best["prediction"]
+    return text, str(p.get("label", p.get("prediction", "")))
+
+
+def for_rows(service, history, run_id: str, rows: list[dict]) -> list[dict]:  # noqa: ANN001
+    """The smallest change for each row of a file (a classifier's runner-up class): extra
+    columns for its predictions CSV. Rows past MAX_ROWS are left blank."""
+    from ai_made_easy.core import tryit
+
+    history.get(run_id)
+    record = json.loads((history.path(run_id) / "run.json").read_text(encoding="utf-8"))
+    frame = _frame(record)
+    worker, meta = tryit._target(service, history, run_id)
+    if meta.get("input_kind") != "records":
+        raise CounterfactualError("what would change it is worked out for models that read "
+                                  "table rows")
+    names = list(worker.signature.get("columns") or (rows[0] if rows else []))
+    columns = candidates(frame, names)
+    out = []
+    for i, row in enumerate(rows):
+        if i >= MAX_ROWS:
+            out.append({"smallest_change": "", "change_predicts": ""})
+            continue
+        try:
+            found = search(lambda batch: worker.ask(batch, timeout=120), dict(row), columns)
+            change, predicts = describe_change(found)
+        except CounterfactualError as exc:   # a regressor needs a target; a bad row
+            change, predicts = f"({exc})", ""
+        out.append({"smallest_change": change, "change_predicts": predicts})
+    return out

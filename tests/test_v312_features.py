@@ -473,3 +473,252 @@ def test_gguf_from_a_run_says_why_when_the_run_is_not_a_fine_tune(isolated_home,
         assert got.status_code == 400 and "use the gguf export format" in got.text
     finally:
         api.set_manager(None)
+
+
+# ------------------------------------------------------------ Phase 2: thresholds in use
+@pytest.mark.slow
+def test_adopted_thresholds_decide_try_it_and_the_package(isolated_home, tmp_path):
+    """Use a Results-by-group run's thresholds: the scored run's Try it, and a package
+    built from it, decide each row's class with its group's threshold; stop using them
+    and 0.5 decides again."""
+    pytest.importorskip("torch")
+    from test_v38_features import _network
+    from test_v311_features import _shifted_table
+
+    from ai_made_easy.core import api
+    from ai_made_easy.core.deploy import build_package
+    from ai_made_easy.core.runner.manager import RunManager
+    from ai_made_easy.core.runs.history import RunHistory
+
+    mgr = RunManager(RunHistory(tmp_path / "runs"))
+    api.set_manager(mgr)
+    try:
+        run_id = api.start_training(_network(_shifted_table(tmp_path / "t.csv")))["run_id"]
+        assert mgr.wait(run_id, 600)["state"] == "finished"
+        scoring = api.results_by_group(run_id, "region")["run_id"]
+        assert mgr.wait(scoring, 600)["state"] == "finished"
+        with pytest.raises(api.ApiError, match="not a Results by group run"):
+            api.use_group_thresholds(run_id)
+        cuts = api.use_group_thresholds(scoring)
+        assert cuts["run_id"] == run_id and cuts["column"] == "region"
+        assert api.group_thresholds(run_id)["thresholds"]["thresholds"] == cuts["thresholds"]
+        east = cuts["thresholds"]["east"]
+        assert api.try_describe(run_id)["group_thresholds"]["column"] == "region"
+        row = {"a": 0.3, "b": 0.3}
+        got = api.try_run(run_id, [{**row, "region": "east"}, row])["predictions"]
+        p = got[0]["probabilities"]["1"]
+        assert got[0]["threshold"] == east and got[0]["group"] == "east"
+        assert got[0]["label"] == ("1" if p >= east else "0")
+        assert got[1]["threshold"] == 0.5 and got[1]["group"] is None   # no region: default
+        package = build_package(mgr.history.path(run_id), tmp_path / "pkg")
+        meta = json.loads((tmp_path / "pkg" / "metadata.json").read_text(encoding="utf-8"))
+        assert meta["group_thresholds"]["thresholds"] == cuts["thresholds"]
+        assert "'region'" in meta["input_help"] and package.path.is_dir()
+        assert (tmp_path / "pkg" / "model" / "group_thresholds.json").is_file()
+        assert api.stop_group_thresholds(run_id)["removed"]
+        again = api.try_run(run_id, [{**row, "region": "east"}])["predictions"][0]
+        assert "threshold" not in again and again["label"] == ("1" if p >= 0.5 else "0")
+    finally:
+        api.try_service().close()
+        api.set_manager(None)
+
+
+@pytest.mark.slow
+def test_a_classic_classifier_uses_adopted_thresholds_too(isolated_home, tmp_path):
+    pytest.importorskip("sklearn")
+    from test_v311_features import _shifted_table
+
+    from ai_made_easy.core import api, recipes
+    from ai_made_easy.core.runner.manager import RunManager
+    from ai_made_easy.core.runs.history import RunHistory
+
+    mgr = RunManager(RunHistory(tmp_path / "runs"))
+    api.set_manager(mgr)
+    try:
+        facts = recipes.detect(_shifted_table(tmp_path / "t.csv"))
+        run_id = mgr.start(recipes.build("random_forest", facts.task, facts,
+                                         {"n_estimators": 50}))
+        assert mgr.wait(run_id, 600)["state"] == "finished"
+        scoring = api.results_by_group(run_id, "region")["run_id"]
+        assert mgr.wait(scoring, 600)["state"] == "finished"
+        cuts = api.use_group_thresholds(scoring)["thresholds"]
+        got = api.try_run(run_id, [{"a": 0.4, "b": 0.4, "region": "east"}])["predictions"][0]
+        assert got["group"] == "east" and got["threshold"] == cuts.get("east", 0.5)
+        p = list(got["probabilities"].values())[1]
+        assert got["label"] == list(got["probabilities"])[int(p >= got["threshold"])]
+    finally:
+        api.try_service().close()
+        api.set_manager(None)
+
+
+@pytest.mark.slow
+def test_the_desktop_uses_thresholds_and_asks_for_the_group(isolated_home, tmp_path):
+    pytest.importorskip("torch")
+    pytest.importorskip("PySide6")
+    import time
+
+    from PySide6 import QtCore, QtWidgets
+    from test_v38_features import _network
+    from test_v311_features import _shifted_table
+
+    from ai_made_easy.core import api
+    from ai_made_easy.core.runner.manager import RunManager
+    from ai_made_easy.core.runs.history import RunHistory
+    from ai_made_easy.ui.app import _ensure_qt_plugin_path
+    from ai_made_easy.ui.features.run_tools import GroupsDialog
+    from ai_made_easy.ui.features.try_dialog import TryDialog, describe_prediction
+
+    mgr = RunManager(RunHistory(tmp_path / "runs"))
+    api.set_manager(mgr)
+    _ensure_qt_plugin_path()
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    try:
+        run_id = api.start_training(_network(_shifted_table(tmp_path / "t.csv")))["run_id"]
+        assert mgr.wait(run_id, 600)["state"] == "finished"
+        scoring = api.results_by_group(run_id, "region")["run_id"]
+        assert mgr.wait(scoring, 600)["state"] == "finished"
+        groups = GroupsDialog(None, mgr, run_id)
+        groups.scoring = scoring
+        groups.show_result(api.group_result(scoring))
+        assert not groups.use_btn.isHidden() and groups.stop_btn.isHidden()
+        groups.use_btn.click()
+        assert groups.in_use.text() == "In use, by region." and not groups.stop_btn.isHidden()
+        dialog = TryDialog(None, mgr.history, run_id)
+        deadline = time.time() + 120
+        while dialog.form_info is None and time.time() < deadline:
+            app.processEvents()
+            QtCore.QThread.msleep(20)
+        assert dialog._group is not None and dialog._group[0] == "region"
+        assert list(dialog._fields) == ["a", "b"]           # the model's own columns
+        dialog._fields["a"].setText("0.3")
+        dialog._fields["b"].setText("0.3")
+        dialog._group[1].setText("east")
+        assert dialog.inputs() == [{"a": 0.3, "b": 0.3, "region": "east"}]
+        text = describe_prediction({"label": "1", "confidence": 0.6, "threshold": 0.31,
+                                    "group": "east", "probabilities": {"0": 0.4, "1": 0.6}})
+        assert "decided at 0.31 (east's threshold)" in text
+        groups.stop_btn.click()
+        assert groups.in_use.text() == "" and not groups.use_btn.isHidden()
+        dialog.deleteLater()
+        groups.deleteLater()
+    finally:
+        api.try_service().close()
+        api.set_manager(None)
+
+
+# ------------------------------------------------------------ Phase 2: a whole file's changes
+@pytest.mark.slow
+def test_a_files_predictions_can_say_what_would_change_each(isolated_home, tmp_path):
+    pytest.importorskip("torch")
+    import csv
+    import io
+
+    from test_v38_features import _network
+    from test_v311_features import _shifted_table
+
+    from ai_made_easy.core import api
+    from ai_made_easy.core.runner.manager import RunManager
+    from ai_made_easy.core.runs.history import RunHistory
+
+    mgr = RunManager(RunHistory(tmp_path / "runs"))
+    api.set_manager(mgr)
+    try:
+        run_id = api.start_training(_network(_shifted_table(tmp_path / "t.csv")))["run_id"]
+        assert mgr.wait(run_id, 600)["state"] == "finished"
+        data = b"a,b\n0.2,0.3\n0.9,0.8\n0.5,0.45\n"
+        plain = api.try_file(run_id, "rows.csv", data)
+        assert "smallest_change" not in plain["csv"]
+        got = api.try_file(run_id, "rows.csv", data, changes=True)
+        rows = list(csv.DictReader(io.StringIO(got["csv"])))
+        assert len(rows) == 3 and {"smallest_change", "change_predicts"} <= set(rows[0])
+        for row in rows:   # each predicts the other class after its change
+            assert row["smallest_change"] and row["change_predicts"] != row["label"], row
+        pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+
+        from ai_made_easy.server.app import create_app
+
+        sent = TestClient(create_app()).post(f"/api/runs/{run_id}/try/file?changes=true",
+                                             files={"file": ("rows.csv", data, "text/csv")})
+        assert sent.status_code == 200 and "smallest_change" in sent.text
+    finally:
+        api.try_service().close()
+        api.set_manager(None)
+
+
+def _group_cut(template: str):  # noqa: ANN202
+    """group_cut as the generated inference code defines it."""
+    source = template[template.index("def group_cut("):template.index("def with_group_thresholds(")]
+    space: dict = {}
+    exec(source, space)  # noqa: S102 — the repository's own template
+    return space["group_cut"]
+
+
+def test_a_row_finds_its_group_however_its_value_was_read():
+    """Training keys groups by str(value) and "(missing)"; a CSV can read 1 as 1.0."""
+    from ai_made_easy.core.classic.template import SKLEARN_TEMPLATE
+    from ai_made_easy.core.training.inference_template import INFERENCE_COMMON
+
+    for template in (INFERENCE_COMMON, SKLEARN_TEMPLATE):
+        cut = _group_cut(template)
+        cuts = {"1": 0.3, "2.0": 0.4, "(missing)": 0.2, "east": 0.6}
+        assert cut({"g": 1.0}, "g", cuts, 0.5) == (0.3, "1")
+        assert cut({"g": 2}, "g", cuts, 0.5) == (0.4, "2.0")
+        assert cut({"g": float("nan")}, "g", cuts, 0.5) == (0.2, "(missing)")
+        assert cut({"g": None}, "g", cuts, 0.5) == (0.2, "(missing)")
+        assert cut({"g": "east"}, "g", cuts, 0.5) == (0.6, "east")
+        assert cut({"g": "west"}, "g", cuts, 0.5) == (0.5, "west")
+        assert cut({"a": 1}, "g", cuts, 0.5) == (0.5, None)
+
+
+def test_thresholds_for_quartiles_of_a_number_are_not_adopted(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from ai_made_easy.core import groups
+
+    scoring, scored = tmp_path / "g1", tmp_path / "r1"
+    scoring.mkdir()
+    scored.mkdir()
+    (scoring / groups.THRESHOLDS).write_text('{"column": "age", "thresholds": {}}',
+                                             encoding="utf-8")
+    (scoring / groups.RESULT).write_text('{"column": "age", "how": "quartiles"}',
+                                         encoding="utf-8")
+    monkeypatch.setattr(groups, "_scored", lambda mgr, run: "r1")
+    mgr = SimpleNamespace(history=SimpleNamespace(path=lambda run: tmp_path / run,
+                                                  get=lambda run: None))
+    with pytest.raises(groups.GroupsError, match="quartiles of a number"):
+        groups.adopt(mgr, "g1")
+    assert not (scored / groups.THRESHOLDS).exists()
+
+
+def test_a_files_changes_keep_the_group_and_work_on_a_scikit_learn_dataset(tmp_path,
+                                                                          monkeypatch):
+    """The search asks about whole rows, so a column the model doesn't read (the group
+    that picks a threshold) is still there; a scikit-learn dataset gives the values."""
+    pytest.importorskip("sklearn")
+    from types import SimpleNamespace
+
+    from ai_made_easy.core import counterfactual, tryit
+
+    record = {"graph": {"nodes": [{"type": "data.sklearn", "params": {"dataset": "iris"}}]}}
+    frame = counterfactual._frame(record)
+    assert "petal length (cm)" in frame.columns and len(frame) == 150
+    seen = []
+
+    def ask(rows, timeout=0):  # noqa: ANN001, ANN202
+        seen.extend(rows)
+        return [{"label": "b" if r["x"] > 5 else "a",
+                 "probabilities": {"a": 0.0 if r["x"] > 5 else 1.0,
+                                   "b": 1.0 if r["x"] > 5 else 0.0}} for r in rows]
+
+    worker = SimpleNamespace(ask=ask, signature={"columns": ["x"]})
+    monkeypatch.setattr(tryit, "_target", lambda *a: (worker, {"input_kind": "records"}))
+    monkeypatch.setattr(counterfactual, "_frame",
+                        lambda record: __import__("pandas").DataFrame({"x": range(10)}))
+    (tmp_path / "run.json").write_text("{}", encoding="utf-8")
+    history = SimpleNamespace(get=lambda run: None, path=lambda run: tmp_path)
+    out = counterfactual.for_rows(None, history, "r1", [{"x": 1, "region": "east"}])
+    assert out[0]["change_predicts"] == "b" and out[0]["smallest_change"].startswith("x 1 →")
+    assert seen and all(r["region"] == "east" for r in seen)
+    assert counterfactual.describe_change({"single": [], "combined": None})[0] == \
+        "no change found"

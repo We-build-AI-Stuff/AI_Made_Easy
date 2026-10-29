@@ -365,14 +365,16 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
             goal, payload.get("locked") or [])
 
     @app.post("/api/runs/{run_id}/try/file", dependencies=guard)
-    async def try_file(run_id: str, file: UploadFile = File(...)) -> Response:  # noqa: B008
-        """Predictions for a whole file of inputs, as a CSV download."""
+    async def try_file(run_id: str, file: UploadFile = File(...),  # noqa: B008
+                       changes: bool = False) -> Response:
+        """Predictions for a whole file of inputs, as a CSV download (``?changes=true``: with
+        each table row's smallest change to another class)."""
         work = Path(tempfile.mkdtemp(prefix="aime_try_"))
         try:
             target = work / "upload"
             await _save_upload(file, target)
             got = await asyncio.to_thread(api.try_file, run_id, file.filename or "inputs",
-                                          target.read_bytes())
+                                          target.read_bytes(), changes)
         finally:
             shutil.rmtree(work, ignore_errors=True)
         return Response(got["csv"], media_type="text/csv", headers={
@@ -621,6 +623,19 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
     @app.get("/api/groups/{run_id}", dependencies=guard)
     def group_result(run_id: str) -> dict:
         return api.group_result(run_id)
+
+    @app.post("/api/groups/{run_id}/use", dependencies=guard)
+    def use_group_thresholds(run_id: str) -> dict:
+        """Use this result's thresholds per group for the run it scored."""
+        return api.use_group_thresholds(run_id)
+
+    @app.get("/api/runs/{run_id}/group-thresholds", dependencies=guard)
+    def group_thresholds(run_id: str) -> dict:
+        return api.group_thresholds(run_id)
+
+    @app.delete("/api/runs/{run_id}/group-thresholds", dependencies=guard)
+    def stop_group_thresholds(run_id: str) -> dict:
+        return api.stop_group_thresholds(run_id)
 
     # -------------------------------------------------------------- deploy
     @app.get("/api/runs/{run_id}/formats", dependencies=guard)

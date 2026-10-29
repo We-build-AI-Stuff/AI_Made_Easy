@@ -566,7 +566,7 @@ def load_predictor(folder: str | Path = ".", device: str = "cpu"):
     """Load the fitted pipeline from a run folder."""
     import __main__
 
-    global _PREDICTOR, _COLUMNS
+    global _PREDICTOR, _COLUMNS, GROUP_THRESHOLDS
     # helper classes / functions were pickled from the training script's __main__
     for name, value in list(globals().items()):
         if callable(value) and getattr(value, "__module__", None) == __name__:
@@ -574,7 +574,54 @@ def load_predictor(folder: str | Path = ".", device: str = "cpu"):
     _PREDICTOR = joblib.load(Path(folder) / MODEL_FILE)
     state_file = Path(folder) / INFERENCE_FILE
     _COLUMNS = json.loads(state_file.read_text(encoding="utf-8")).get("columns") if state_file.exists() else None
+    adopted = Path(folder) / "group_thresholds.json"
+    GROUP_THRESHOLDS = json.loads(adopted.read_text(encoding="utf-8")) if adopted.is_file() else {}
     return _PREDICTOR
+
+
+GROUP_THRESHOLDS: dict = {}   # thresholds per group the run adopted (group_thresholds.json)
+
+
+def group_cut(item, column: str, cuts: dict, default: float) -> tuple[float, str | None]:
+    """A row's group threshold, and the group it was found under. Groups are keyed as
+    training wrote them: str() of the value, "(missing)" for an empty cell; a whole number
+    read as 1.0 finds "1", and 1 finds "1.0". A row without the column gets the default."""
+    if not isinstance(item, dict) or column not in item:
+        return default, None
+    group = item[column]
+    if group is None or (isinstance(group, float) and group != group):
+        keys = ["(missing)"]
+    elif isinstance(group, float) and group.is_integer():
+        keys = [str(group), str(int(group))]
+    elif isinstance(group, int) and not isinstance(group, bool):
+        keys = [str(group), str(float(group))]
+    else:
+        keys = [str(group)]
+    found = next((k for k in keys if k in cuts), None)
+    return (float(cuts[found]), found) if found is not None else (default, keys[0])
+
+
+def with_group_thresholds(results: list[dict], raw) -> list[dict]:  # noqa: ANN001
+    """A two-class prediction decided by its row's group threshold instead of 0.5, when
+    the run adopted thresholds per group (Results by group). The row carries the group
+    column even when the model doesn't read it; without it the default applies."""
+    if not GROUP_THRESHOLDS:
+        return results
+    column, cuts = GROUP_THRESHOLDS["column"], GROUP_THRESHOLDS["thresholds"]
+    default = float(GROUP_THRESHOLDS.get("default", 0.5))
+    rows = raw.to_dict("records") if hasattr(raw, "to_dict") else raw
+    for result, item in zip(results, rows):
+        probs = result.get("probabilities")
+        if not isinstance(probs, dict) or len(probs) != 2:
+            continue
+        cut, group = group_cut(item, column, cuts, default)
+        names = list(probs)
+        p = float(probs[names[1]])
+        best = int(p >= cut)
+        result.update(label=names[best], class_index=best,
+                      confidence=round(p if best else 1 - p, 6), threshold=cut,
+                      group=group)
+    return results
 
 
 def prepare_inputs(raw: list):
@@ -646,7 +693,7 @@ def infer(raw: list) -> list[dict]:
         out.append({"label": classes[best], "class_index": best,
                     "confidence": round(float(row[best]), 6),
                     "probabilities": {c: round(float(p), 6) for c, p in zip(classes, row, strict=True)}})
-    return out
+    return with_group_thresholds(out, raw)
 {% elif task == "regression" %}
     values = np.asarray(_PREDICTOR.predict(X), dtype=float)
     return [{"prediction": (float(v) if np.ndim(v) == 0 else [float(x) for x in v])}

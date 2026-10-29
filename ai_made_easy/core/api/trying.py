@@ -43,12 +43,15 @@ def what_would_change(run_id: str, row: dict, desired: str | None = None,
         raise ApiError(str(exc)) from exc
 
 
-def try_file(run_id: str, filename: str, data: bytes) -> dict:
+def try_file(run_id: str, filename: str, data: bytes, changes: bool = False) -> dict:
     """Predictions of a finished run for every input in a file (a CSV table, a text file,
-    or a zip of images or WAV clips) as CSV text: ``{"csv", "rows", "filename"}``."""
+    or a zip of images or WAV clips) as CSV text: ``{"csv", "rows", "filename"}``. With
+    ``changes``, a classifier's table rows also get the smallest change that predicts
+    another class (``smallest_change``, ``change_predicts``; the first 500 rows)."""
     from ai_made_easy.core import tryit
 
     try:
-        return tryit.predict_file(try_service(), manager().history, run_id, filename, data)
+        return tryit.predict_file(try_service(), manager().history, run_id, filename, data,
+                                  changes)
     except tryit.TryError as exc:
         raise ApiError(str(exc)) from exc

@@ -42,7 +42,12 @@ export function TryResult({ prediction }: { prediction: Prediction }) {
                      src={`data:image/png;base64,${cam}`} />}
         <div><strong>{String(prediction.label)}</strong>
           {typeof prediction.confidence === "number"
-            && <span className="muted"> · {(prediction.confidence * 100).toFixed(1)}% sure</span>}</div>
+            && <span className="muted"> · {(prediction.confidence * 100).toFixed(1)}% sure</span>}
+          {typeof prediction.threshold === "number" && (
+            <span className="muted" data-testid="try-threshold"> · decided at{" "}
+              {Number(prediction.threshold).toFixed(2)}
+              {prediction.group ? ` (${String(prediction.group)}'s threshold)` : " (no group given)"}
+            </span>)}</div>
         {top.map(([name, p]) => (
           <div key={name} className="try-bar">
             <span>{name}</span>
@@ -72,6 +77,7 @@ export function TryModal({ run, onClose }: { run: RunRecord; onClose: () => void
   const [result, setResult] = useState<{ predictions: Prediction[]; latency_ms: number } | null>(null);
   const [asked, setAsked] = useState<Record<string, unknown> | null>(null);   // the row predicted
   const [explain, setExplain] = useState(false);
+  const [withChanges, setWithChanges] = useState(false);
   const [batch, setBatch] = useState<{ name: string; url: string; rows: number } | null>(null);
 
   useEffect(() => {
@@ -82,7 +88,11 @@ export function TryModal({ run, onClose }: { run: RunRecord; onClose: () => void
   }, [run.run_id]);
 
   const kind = form?.input_kind ?? "";
-  const columns = kind === "records" ? form?.signature.columns ?? [] : [];
+  const modelColumns = kind === "records" ? form?.signature.columns ?? [] : [];
+  // a run that uses thresholds per group also needs each row's group (the model may not read it)
+  const groupColumn = form?.group_thresholds?.column;
+  const columns = groupColumn && !modelColumns.includes(groupColumn)
+    ? [...modelColumns, groupColumn] : modelColumns;
   const fileKind = FILE_KINDS[kind];
 
   const inputs = (): unknown[] => {
@@ -113,7 +123,7 @@ export function TryModal({ run, onClose }: { run: RunRecord; onClose: () => void
     setBusy(true);
     setError("");
     try {
-      const csv = await api.tryFile(run.run_id, file);
+      const csv = await api.tryFile(run.run_id, file, withChanges);
       if (batch) URL.revokeObjectURL(batch.url);
       const stem = file.name.replace(/\.[^.]+$/, "");
       setBatch({ name: `${stem}_predictions.csv`, rows: Math.max(0, csv.trim().split("\n").length - 1),
@@ -137,7 +147,12 @@ export function TryModal({ run, onClose }: { run: RunRecord; onClose: () => void
           {columns.length > 0 && columns.map((c) => (
             <div key={c} className="field"><label htmlFor={`try-${c}`}>{c}</label>
               <input id={`try-${c}`} value={fields[c] ?? ""}
-                     onChange={(e) => setFields((f) => ({ ...f, [c]: e.target.value }))} /></div>))}
+                     onChange={(e) => setFields((f) => ({ ...f, [c]: e.target.value }))} />
+              {c === groupColumn && (
+                <div className="help" data-testid="try-group-help">Its group's threshold decides
+                  the class ({Object.entries(form?.group_thresholds?.thresholds ?? {})
+                    .map(([g, t]) => `${g} ${t.toFixed(2)}`).join(", ")}; otherwise{" "}
+                  {(form?.group_thresholds?.default ?? 0.5).toFixed(2)}).</div>)}</div>))}
           {TEXT_KINDS.has(kind) && (
             <div className="field"><label htmlFor="try-text">Text</label>
               <textarea id="try-text" rows={4} value={text} onChange={(e) => setText(e.target.value)}
@@ -167,6 +182,12 @@ export function TryModal({ run, onClose }: { run: RunRecord; onClose: () => void
                      onChange={(e) => { const f = e.target.files?.[0]; if (f) void predictFile(f); }} />
               <div className="help">One prediction per {kind === "images" || kind === "audio" || kind === "speech"
                 ? "file in the zip" : "row"}; the predictions come back as a CSV.</div>
+              {kind === "records" && form.task !== "regression" && (
+                <label className="check">
+                  <input type="checkbox" checked={withChanges} data-testid="try-batch-changes"
+                         onChange={(e) => setWithChanges(e.target.checked)} />
+                  Add what would change each prediction (the smallest change to another class,
+                  for the first 500 rows; slower)</label>)}
               {batch && (
                 <p data-testid="try-batch-result">{batch.rows} predictions ·{" "}
                   <a href={batch.url} download={batch.name}>download {batch.name}</a></p>)}
@@ -180,7 +201,7 @@ export function TryModal({ run, onClose }: { run: RunRecord; onClose: () => void
         </div>)}
       {result && asked && (   // keyed by the row: a new prediction starts a new search
         <WhatWouldChange key={JSON.stringify(asked)} runId={run.run_id} row={asked}
-                         columns={columns} prediction={result.predictions[0]} />)}
+                         columns={modelColumns} prediction={result.predictions[0]} />)}
     </Modal>
   );
 }
