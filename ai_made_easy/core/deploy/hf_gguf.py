@@ -329,10 +329,6 @@ def _pre_tokenizer(spec: dict) -> str:
 
 def write_gguf(model_dir: Path, path: Path, quant: str = "") -> dict:
     """``model_dir`` (a Hugging Face model saved with its tokenizer) as one GGUF file."""
-    import gguf
-
-    from ai_made_easy.core.deploy.exporters import add_gguf_tensor
-
     model_dir, path = Path(model_dir), Path(path)
     config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     arch = (config.get("architectures") or ["?"])[0]
@@ -340,6 +336,13 @@ def write_gguf(model_dir: Path, path: Path, quant: str = "") -> dict:
     if family is None:
         raise HfGgufError(f"GGUF export takes Llama, Qwen2, Phi-3 and Gemma 3 language "
                           f"models; this one is {arch}")
+    try:
+        import gguf
+    except ImportError as exc:
+        raise HfGgufError("GGUF export needs the gguf package: pip install "
+                          "'ai-made-easy[gguf]'") from exc
+
+    from ai_made_easy.core.deploy.exporters import add_gguf_tensor
     writer = gguf.GGUFWriter(str(path), family)
     writer.add_name(config.get("_name_or_path") or "AI Made Easy fine-tune")
     extra = _parameters(writer, family, config)
