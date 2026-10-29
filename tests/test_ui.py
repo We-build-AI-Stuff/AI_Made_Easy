@@ -202,6 +202,31 @@ def test_delete_selection_and_select_all(ctx, app):
     assert len(ctx.canvas.selected_ids()) == before - 1
 
 
+def test_switching_themes_keeps_the_style(ctx, app):
+    """Setting the style again deletes the old one, which widgets still alive (another
+    window waiting to be deleted) may use: that crashed opening a second window."""
+    import shiboken6
+
+    before = app.style()
+    ctx.act_theme_light()
+    ctx.act_theme_dark()
+    assert shiboken6.isValid(before) and app.style() is before
+    sheet = app.styleSheet()
+    restyled = []
+
+    class Probe(QtWidgets.QWidget):
+        def changeEvent(self, event):  # noqa: ANN001, N802 (Qt name)
+            restyled.append(event.type())
+
+    probe = Probe()
+    app.processEvents()
+    restyled.clear()
+    ctx.theme.apply(app, ctx.theme.active())        # a second window, the same theme
+    app.processEvents()
+    assert app.styleSheet() == sheet and not restyled
+    probe.deleteLater()
+
+
 def test_theme_switch_updates_canvas_tokens(ctx, app):
     from ai_made_easy.ui.canvas import painter
 

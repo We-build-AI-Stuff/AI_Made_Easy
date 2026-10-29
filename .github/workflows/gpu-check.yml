@@ -1,0 +1,54 @@
+name: GPU check
+
+# Training on several real GPUs (DistributedDataParallel and sharding over NCCL, float16
+# loss scaling), which CI's runners can't do: 2 GPUs in a Modal sandbox. Started by hand,
+# because it costs GPU time. Needs the repository secrets MODAL_TOKEN_ID and
+# MODAL_TOKEN_SECRET (`modal token new`, then Settings → Secrets → Actions).
+on:
+  workflow_dispatch:
+    inputs:
+      gpu:
+        description: Modal GPU type (2 of them)
+        type: choice
+        options: [L4, A10G, A100, H100, T4]
+        default: L4
+
+jobs:
+  gpu-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - name: Modal sign-in is set up
+        if: env.MODAL_TOKEN_ID == '' || env.MODAL_TOKEN_SECRET == ''
+        run: |
+          echo "::error::Add the repository secrets MODAL_TOKEN_ID and MODAL_TOKEN_SECRET (modal token new) to run the GPU check."
+          exit 1
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[modal]"
+      - name: Train on 2 GPUs
+        env:
+          GPU: ${{ inputs.gpu }}
+        run: python scripts/gpu_check.py --gpu "$GPU" --out gpu_check.json
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f gpu_check.json ]; then
+            python -c "import json, sys; sys.path.insert(0, 'scripts'); import gpu_check; print(gpu_check.summary(json.load(open('gpu_check.json'))))" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gpu-check
+          path: gpu_check.json
+          if-no-files-found: ignore

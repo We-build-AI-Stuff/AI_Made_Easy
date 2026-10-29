@@ -86,10 +86,29 @@ class ModalClient:
             self.sandbox.terminate()
 
 
+MOST_GPUS = {"A10G": 4}   # GPUs per sandbox; the others take up to 8
+
+
+def _count(value) -> int:  # noqa: ANN001
+    """gpu_count as given: absent means 1; anything but a whole number is 0 (rejected),
+    so 2.9 or 0 never quietly become another count."""
+    if value is None or value == "":
+        return 1
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    # isdecimal, not isdigit: "²" is a digit that int() can't read
+    return int(text) if text.isascii() and text.isdecimal() else 0
+
+
 class ModalBackend(RemoteBackend):
     kind = "modal"
     options_help = {
         "gpu": f"one of {', '.join(GPUS)} (default T4)",
+        "gpu_count": "GPUs in the sandbox, 1 to 8 (A10G: 4; default 1); the Trainer's GPUs "
+                     "uses them",
         "timeout_minutes": "the longest a run may take (default 240)",
     }
     client_factory = ModalClient
@@ -99,13 +118,22 @@ class ModalBackend(RemoteBackend):
         self.gpu = str(options.get("gpu") or "T4")
         if self.gpu not in GPUS:
             raise BackendError(f"Modal gpu must be one of {', '.join(GPUS)}")
+        self.gpu_count = _count(options.get("gpu_count"))
+        most = MOST_GPUS.get(self.gpu, 8)
+        if not 1 <= self.gpu_count <= most or (self.gpu == "none" and self.gpu_count > 1):
+            raise BackendError(f"Modal gpu_count must be a whole number from 1 to {most}"
+                               + (" (A10G machines have 4)" if most == 4 else ", with a gpu"))
         self.timeout = int(float(options.get("timeout_minutes", 240)) * 60)
+
+    def gpu_spec(self) -> str:
+        """What Modal is asked for: ``A100`` or, for several, ``A100:2``."""
+        return self.gpu if self.gpu_count == 1 else f"{self.gpu}:{self.gpu_count}"
 
     def accelerator(self) -> dict:
         if self.gpu == "none":
             return {"gpu": "", "device": "cpu_laptop"}
-        return {"gpu": self.gpu, "device": device_for_gpu(self.gpu,
-                                                          80 if "80" in self.gpu else None)}
+        return {"gpu": self.gpu_spec(), "count": self.gpu_count,
+                "device": device_for_gpu(self.gpu, 80 if "80" in self.gpu else None)}
 
     def test(self) -> dict:
         try:
@@ -125,10 +153,10 @@ class ModalBackend(RemoteBackend):
             self.check_budget(run)
             if run.history is not None:
                 run.history.update(run.run_id, remote=self.remote_state(run))
-            self.note(run, f"starting a Modal sandbox ({self.gpu}); the first run builds "
+            self.note(run, f"starting a Modal sandbox ({self.gpu_spec()}); the first run builds "
                            "the image, which takes a few minutes")
             for line in client.run(run.run_id, run.bundle.tar_bytes(), run.bundle.launcher(),
-                                   gpu=self.gpu, requirements=run.bundle.requirements,
+                                   gpu=self.gpu_spec(), requirements=run.bundle.requirements,
                                    timeout=self.timeout):
                 self.feed(run, line)
             code = client.returncode()
