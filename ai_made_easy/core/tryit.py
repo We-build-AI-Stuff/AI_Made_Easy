@@ -244,6 +244,14 @@ class TryService:
         worker.signature = first.get("signature") or {}
         return worker
 
+    def forget(self, run_id: str) -> None:
+        """Close a run's worker, so the next prediction loads what the run has now (its
+        thresholds per group, say)."""
+        with self._lock:
+            worker = self._workers.pop(run_id, None)
+        if worker is not None:
+            worker.close()
+
     def close(self) -> None:
         with self._lock:
             for worker in self._workers.values():
@@ -269,9 +277,11 @@ def describe(service: TryService, history, run_id: str) -> dict:  # noqa: ANN001
         example = json.loads(_example(meta, worker.signature)).get("inputs")
     except ValueError:   # a placeholder such as "<base64 image>"
         example = None
+    adopted = history.path(run_id) / "group_thresholds.json"
+    groups = json.loads(adopted.read_text(encoding="utf-8")) if adopted.is_file() else None
     return {"run_id": run_id, "task": meta.get("task"), "modality": meta.get("modality"),
             "input_kind": meta["input_kind"], "input_help": meta.get("input_help", ""),
-            "example": example, "signature": worker.signature,
+            "example": example, "signature": worker.signature, "group_thresholds": groups,
             "can_explain": bool(worker.signature.get("explain")),
             "batch_formats": BATCH_FORMATS.get(meta["input_kind"], "")}
 
@@ -423,9 +433,11 @@ def _flat(prediction) -> dict:
 
 
 def predict_file(service: TryService, history, run_id: str, filename: str,  # noqa: ANN001
-                 data: bytes) -> dict:
+                 data: bytes, changes: bool = False) -> dict:
     """Predictions for every input in an uploaded file, as CSV text (the inputs' names or
-    row numbers first, then the prediction columns)."""
+    row numbers first, then the prediction columns). With ``changes``, a table's rows also
+    get the smallest change that predicts another class (the first rows; see
+    counterfactual.MAX_ROWS)."""
     import time
 
     worker, meta = _target(service, history, run_id)
@@ -439,6 +451,17 @@ def predict_file(service: TryService, history, run_id: str, filename: str,  # no
     rows = []
     for at in range(0, len(inputs), _CHUNK):
         rows += [_flat(p) for p in worker.ask(inputs[at:at + _CHUNK], timeout=300)]
+    if changes:
+        from ai_made_easy.core import counterfactual
+
+        if kind != "records":
+            raise TryError("what would change it is worked out for models that read table "
+                           "rows")
+        try:
+            extra = counterfactual.for_rows(service, history, run_id, inputs)
+        except counterfactual.CounterfactualError as exc:
+            raise TryError(str(exc)) from exc
+        rows = [{**r, **e} for r, e in zip(rows, extra, strict=True)]
     key = "file" if kind in ("images", "audio", "speech") else "row"
     columns = [key] + list(dict.fromkeys(c for r in rows for c in r))
     out = io.StringIO()

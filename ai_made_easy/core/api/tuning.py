@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from ai_made_easy.core.graph import Graph
-from ai_made_easy.core.api import ApiError, _graph, manager
+from ai_made_easy.core.api import ApiError, _graph, manager, try_service
 
 
 def find_learning_rate(graph: dict | Graph, *, start: float | None = None,
@@ -99,3 +99,35 @@ def group_result(run_id: str) -> dict:
     from ai_made_easy.core import groups
 
     return groups.result(manager(), run_id)
+
+
+def use_group_thresholds(groups_run_id: str) -> dict:
+    """Use the thresholds per group a Results-by-group run fitted (two-class
+    classifiers): the scored run's Try it and deployment packages then decide each row's
+    class with its group's threshold. Requests carry the group column."""
+    from ai_made_easy.core import groups
+
+    try:
+        out = groups.adopt(manager(), groups_run_id)
+    except (groups.GroupsError, KeyError, FileNotFoundError) as exc:
+        raise ApiError(str(exc)) from exc
+    try_service().forget(out["run_id"])
+    return out
+
+
+def group_thresholds(run_id: str) -> dict:
+    """The thresholds per group a run uses, if any."""
+    from ai_made_easy.core import groups
+
+    manager().history.get(run_id)
+    return {"run_id": run_id, "thresholds": groups.adopted(manager(), run_id)}
+
+
+def stop_group_thresholds(run_id: str) -> dict:
+    """Back to one threshold (0.5) for every row."""
+    from ai_made_easy.core import groups
+
+    manager().history.get(run_id)
+    out = groups.drop(manager(), run_id)
+    try_service().forget(run_id)
+    return out

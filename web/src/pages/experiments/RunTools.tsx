@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { api } from "../../api";
 import { metric, Modal } from "../../components/Modal";
 import { useStore } from "../../state";
-import type { GroupColumn, GroupResult, Mitigation, RunRecord } from "../../types";
+import type { GroupColumn, GroupResult, GroupThresholds, Mitigation, RunRecord } from "../../types";
 
 const FINAL = ["finished", "failed", "stopped", "interrupted"];
 
@@ -128,7 +128,8 @@ export function GroupsModal({ run, onClose }: { run: RunRecord; onClose: () => v
           {result.fairness && (
             <p data-testid="fairness"><b className={result.fairness.flagged.length ? "sev-warning" : ""}>
               Fairness:</b> {result.fairness.summary}</p>)}
-          {result.mitigation && <Thresholds m={result.mitigation} column={result.column ?? ""} />}
+          {result.mitigation && <Thresholds m={result.mitigation} column={result.column ?? ""}
+            scoring={result.run_id} run={run.run_id} />}
         </div>)}
     </Modal>
   );
@@ -137,8 +138,28 @@ export function GroupsModal({ run, onClose }: { run: RunRecord; onClose: () => v
 const pct = (v: number | null | undefined) => (typeof v === "number" ? `${(v * 100).toFixed(0)}%` : "—");
 
 /** A threshold per group: each group's rates at 0.5 and with its own threshold. */
-function Thresholds({ m, column }: { m: Mitigation; column: string }) {
+function Thresholds({ m, column, scoring, run }:
+  { m: Mitigation; column: string; scoring: string; run: string }) {
+  const { notify } = useStore();
   const after = new Map(m.after.groups.map((g) => [g.value, g]));
+  const [inUse, setInUse] = useState<GroupThresholds | null>(null);
+  useEffect(() => {
+    api.groupThresholds(run).then((r) => setInUse(r.thresholds)).catch(() => setInUse(null));
+  }, [run]);
+  const use = async () => {
+    try {
+      const used = await api.useGroupThresholds(scoring);
+      setInUse(used);
+      notify(`Run ${run} now decides each row with its ${used.column} threshold`);
+    } catch (e) { notify(String((e as Error).message), true); }
+  };
+  const stop = async () => {
+    try {
+      await api.stopGroupThresholds(run);
+      setInUse(null);
+      notify(`Run ${run} uses 0.5 for every row again`);
+    } catch (e) { notify(String((e as Error).message), true); }
+  };
   return (
     <div data-testid="thresholds">
       <h4>A threshold per group</h4>
@@ -162,8 +183,16 @@ function Thresholds({ m, column }: { m: Mitigation; column: string }) {
         </tbody>
       </table>
       <p className="dim">Before → after, on {m.before.overall.count} rows the thresholds were
-        not fitted on. They are saved as group_thresholds.json in this scoring run: predict
-        the positive class when its probability reaches the row's group threshold.</p>
+        not fitted on. Using them, the run's Try it and its deployment packages predict the
+        positive class when its probability reaches the row's group threshold; requests
+        then include each row's {column}.</p>
+      <div className="row" data-testid="thresholds-use">
+        {inUse
+          ? <><span className="chip">in use, by {inUse.column}</span>{" "}
+            <button onClick={stop} data-testid="thresholds-stop">Stop using them</button></>
+          : <button className="primary" onClick={use} data-testid="thresholds-adopt">
+            Use these thresholds</button>}
+      </div>
     </div>
   );
 }

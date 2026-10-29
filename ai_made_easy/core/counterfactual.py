@@ -238,3 +238,45 @@ def what_would_change(service, history, run_id: str, row: dict, *,  # noqa: ANN0
     out = search(lambda rows: worker.ask(rows, timeout=120), {c: row[c] for c in names},
                  columns, desired=desired, target=target, locked=locked)
     return {"run_id": run_id, **out}
+
+
+MAX_ROWS = 500   # rows of a file the search runs for (each asks the model dozens of times)
+
+
+def describe_change(found: dict) -> tuple[str, str]:
+    """A search's answer in a few words: (the smallest change, what it predicts then)."""
+    best = (found.get("single") or [None])[0] or found.get("combined")
+    if not best:
+        return "no change of up to three columns", ""
+    text = "; ".join(f"{c['column']} {c['from']} → {c['to']}" for c in best["changes"])
+    p = best["prediction"]
+    return text, str(p.get("label", p.get("prediction", "")))
+
+
+def for_rows(service, history, run_id: str, rows: list[dict]) -> list[dict]:  # noqa: ANN001
+    """The smallest change for each row of a file (a classifier's runner-up class): extra
+    columns for its predictions CSV. Rows past MAX_ROWS are left blank."""
+    from ai_made_easy.core import tryit
+
+    history.get(run_id)
+    record = json.loads((history.path(run_id) / "run.json").read_text(encoding="utf-8"))
+    path, fmt = _table(record)
+    worker, meta = tryit._target(service, history, run_id)
+    if meta.get("input_kind") != "records":
+        raise CounterfactualError("what would change it is worked out for models that read "
+                                  "table rows")
+    names = list(worker.signature.get("columns") or (rows[0] if rows else []))
+    columns = candidates(path, fmt, names)
+    out = []
+    for i, row in enumerate(rows):
+        if i >= MAX_ROWS:
+            out.append({"smallest_change": "", "change_predicts": ""})
+            continue
+        try:
+            found = search(lambda batch: worker.ask(batch, timeout=120),
+                           {c: row.get(c) for c in names}, columns)
+            change, predicts = describe_change(found)
+        except CounterfactualError as exc:   # a regressor needs a target; a bad row
+            change, predicts = f"({exc})", ""
+        out.append({"smallest_change": change, "change_predicts": predicts})
+    return out

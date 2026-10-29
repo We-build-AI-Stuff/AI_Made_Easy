@@ -106,7 +106,8 @@ def _artifacts(run_dir: Path, framework: str) -> tuple[Path, list[Path]]:
                 f"the run has no {pattern} — it did not finish training, was trained with "
                 "k-fold cross-validation only, or predates AI Made Easy 2.0 (retrain it)")
         files.extend(found)
-    for optional in ("classes.json", "metrics.json", "calibration.npz", "qat_int8.pt2"):
+    for optional in ("classes.json", "metrics.json", "calibration.npz", "qat_int8.pt2",
+                     "group_thresholds.json"):
         if (run_dir / optional).exists():
             files.append(run_dir / optional)
     return script, files
@@ -388,6 +389,11 @@ def build_package(run_dir: Path | str, out_dir: Path | str, *, formats: tuple[st
     py = str(env.get("python") or "3.12")
     py_minor = ".".join(py.split(".")[:2])
     keras_env = ""
+    adopted = run_dir / "group_thresholds.json"
+    if adopted.is_file():   # served predictions use each row's group threshold
+        meta["group_thresholds"] = json.loads(adopted.read_text(encoding="utf-8"))
+        meta["input_help"] += (f"; include each row's {meta['group_thresholds']['column']!r} "
+                               "value: its group's threshold decides the class")
     if framework == "keras":
         meta["keras_backend"] = env.get("keras_backend") or "torch"
         keras_env = f" \\\n    KERAS_BACKEND={meta['keras_backend']}"

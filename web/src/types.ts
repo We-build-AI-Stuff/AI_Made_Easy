@@ -559,6 +559,8 @@ export interface TryForm {
   signature: { input_shape?: number[]; classes?: string[] | null; columns?: string[] | null };
   /** An image classifier that can show its Grad-CAM heatmap (3.6). */
   can_explain?: boolean;
+  /** Thresholds per group the run uses: rows carry the group column too. */
+  group_thresholds?: GroupThresholds | null;
   /** File types "Predict a file" takes, e.g. ".csv" or ".zip"; "" when it can't (3.6). */
   batch_formats?: string;
 }
@@ -644,4 +646,16 @@ export interface ResumeInfo {
   resumable: boolean;
   after_epoch?: number;
   reason?: string;
+}
+
+/** Thresholds per group a run uses (Results by group → Use these thresholds). */
+export interface GroupThresholds {
+  column: string;
+  default: number;
+  thresholds: Record<string, number>;
+}
+
+export interface GroupThresholdsUsed extends GroupThresholds {
+  run_id: string;
+  from: string;
 }

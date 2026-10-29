@@ -196,6 +196,20 @@ class GroupsDialog(QtWidgets.QDialog):
         self.thresholds.setAccessibleName("A threshold per group, before and after")
         self.thresholds.hide()
         layout.addWidget(self.thresholds)
+        use_row = QtWidgets.QHBoxLayout()
+        self.in_use = QtWidgets.QLabel("")
+        self.in_use.setAccessibleName("Thresholds per group in use")
+        use_row.addWidget(self.in_use, 1)
+        self.use_btn = QtWidgets.QPushButton("Use These Thresholds")
+        self.use_btn.setToolTip("Try it and the run's deployment packages decide each row's "
+                                "class with its group's threshold")
+        self.stop_btn = QtWidgets.QPushButton("Stop Using Them")
+        for b in (self.use_btn, self.stop_btn):
+            b.hide()
+            use_row.addWidget(b)
+        layout.addLayout(use_row)
+        self.use_btn.clicked.connect(self._use)
+        self.stop_btn.clicked.connect(self._stop)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -276,11 +290,14 @@ class GroupsDialog(QtWidgets.QDialog):
         self.thresholds.setVisible(bool(found))
         if not found:
             self.thresholds_note.setText("")
+            self._show_use(False)
             return
         self.thresholds_note.setText(
             f"A threshold per group: {found.get('summary', '')}\nBefore → after, on "
-            f"{found['before']['overall']['count']} rows the thresholds were not fitted on; "
-            "saved as group_thresholds.json in the scoring run.")
+            f"{found['before']['overall']['count']} rows the thresholds were not fitted on. "
+            f"Using them, Try it and the run's packages decide each row with its {column}'s "
+            "threshold (requests then include the column).")
+        self._show_use(True)
         self.thresholds.setHorizontalHeaderLabels(
             [column, "Threshold", "True positives", "False positives", "Accuracy"])
 
@@ -298,6 +315,38 @@ class GroupsDialog(QtWidgets.QDialog):
                      f"{pct(g['accuracy'])} → {pct(a['accuracy'])}"]
             for j, text in enumerate(cells):
                 self.thresholds.setItem(i, j, QtWidgets.QTableWidgetItem(text))
+
+    def _show_use(self, offered: bool) -> None:
+        from ai_made_easy.core import groups
+
+        used = groups.adopted(self.manager, self.run_id) if offered else None
+        self.use_btn.setVisible(offered and used is None)
+        self.stop_btn.setVisible(used is not None)
+        self.in_use.setText(f"In use, by {used['column']}." if used else "")
+
+    def _use(self) -> None:
+        from ai_made_easy.core import groups
+
+        try:
+            groups.adopt(self.manager, self.scoring)
+        except (groups.GroupsError, KeyError, OSError) as exc:
+            QtWidgets.QMessageBox.warning(self, "Use These Thresholds", str(exc))
+            return
+        self._reload_try()
+        self._show_use(True)
+
+    def _reload_try(self) -> None:
+        """Try it loads the run again, with its thresholds (or without)."""
+        from ai_made_easy.core import api
+
+        api.try_service().forget(self.run_id)
+
+    def _stop(self) -> None:
+        from ai_made_easy.core import groups
+
+        groups.drop(self.manager, self.run_id)
+        self._reload_try()
+        self._show_use(True)
 
     def reject(self) -> None:
         self.timer.stop()
