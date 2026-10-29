@@ -284,7 +284,8 @@ def test_other_hugging_face_models_say_why_they_cant_export(tmp_path):
 
     from ai_made_easy.core.deploy import hf_gguf
 
-    (tmp_path / "config.json").write_text(_json.dumps({"architectures": ["GPT2LMHeadModel"]}))
+    (tmp_path / "config.json").write_text(_json.dumps({"architectures": ["GPT2LMHeadModel"]}),
+                                          encoding="utf-8")
     with pytest.raises(hf_gguf.HfGgufError, match="Llama, Qwen2, Phi-3 and Gemma 3"):
         hf_gguf.write_gguf(tmp_path, tmp_path / "x.gguf")
     with pytest.raises(hf_gguf.HfGgufError, match="pre-tokenizer isn't one llama.cpp knows"):
@@ -316,7 +317,7 @@ def test_a_lora_fine_tune_run_exports_to_gguf(tmp_path):
     AutoTokenizer.from_pretrained(tmp_path / "base").save_pretrained(adapter)
     (run / "run.json").write_text(_json.dumps({"run_id": "r1", "graph": {"nodes": [
         {"id": "m", "type": "llm.model", "params": {"repo_id": str(tmp_path / "base")}},
-        {"id": "l", "type": "llm.lora", "params": {}}]}}))
+        {"id": "l", "type": "llm.lora", "params": {}}]}}), encoding="utf-8")
     report = hf_gguf.export_run(run, tmp_path / "out", "q8_0")
     assert report["ok"] and report["file"].endswith("chat-q8_0.gguf"), report
     assert report["base"] == str(tmp_path / "base") and report["top1"] >= 0.9
