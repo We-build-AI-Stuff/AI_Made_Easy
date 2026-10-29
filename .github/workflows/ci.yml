@@ -308,12 +308,17 @@ jobs:
         run: pytest -q -p no:cacheprovider -rfE tests/test_openvino.py tests/test_export.py -k "openvino"
       - name: Install gguf and llama.cpp
         run: |
-          pip install -e ".[gguf]"
+          pip install -e ".[gguf,llm]"
           pip install llama-cpp-python --prefer-binary \
             --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-          python -c "import llama_cpp, gguf"      # the checks below skip without them
+          # the checks below skip without them
+          python -c "import llama_cpp, gguf, sentencepiece, transformers, peft, tokenizers"
       - name: GGUF exports load in llama.cpp, match PyTorch and tokenize like the run
         run: pytest -q -p no:cacheprovider -rfE --run-slow tests/test_v311_features.py -k "gguf"
+      # 3.12: GPTs, RWKV-7, Q8_0 / Q4_0, and fine-tuned Hugging Face models (Llama, Qwen2,
+      # Phi-3, Gemma 3; tiny random models built in the test, nothing downloaded)
+      - name: More GGUF exports match PyTorch and transformers in llama.cpp
+        run: pytest -q -p no:cacheprovider -rfE --run-slow tests/test_v312_features.py
 
   test-tools:
     # 3.2 Phase 3: MLflow (local SQLite store) and W&B (offline) mirror real runs; the
