@@ -299,6 +299,7 @@ fieldset.budget label { display: flex; justify-content: space-between; align-ite
 .modal section h3 { margin: 0 0 6px; }
 .modal section .toolbar { margin-top: 8px; }
 .check { display: inline-flex; align-items: center; gap: 6px; margin-right: 18px; }
+.field label.check { display: flex; margin-bottom: 3px; }   /* a checkbox beside its text in a field */
 fieldset.locks { border: 1px solid var(--border); border-radius: 6px; margin: 0 0 10px;
   padding: 6px 10px; }
 fieldset.locks legend { font-size: 11px; color: var(--text-muted); padding: 0 4px; }

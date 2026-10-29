@@ -185,9 +185,12 @@ export function TryModal({ run, onClose }: { run: RunRecord; onClose: () => void
               {kind === "records" && form.task !== "regression" && (
                 <label className="check">
                   <input type="checkbox" checked={withChanges} data-testid="try-batch-changes"
+                         aria-describedby="try-batch-changes-help"
                          onChange={(e) => setWithChanges(e.target.checked)} />
-                  Add what would change each prediction (the smallest change to another class,
-                  for the first 500 rows; slower)</label>)}
+                  Add what would change each prediction</label>)}
+              {kind === "records" && form.task !== "regression" && (
+                <div className="help" id="try-batch-changes-help">The smallest change to another class, for the first
+                  500 rows (slower).</div>)}
               {batch && (
                 <p data-testid="try-batch-result">{batch.rows} predictions ·{" "}
                   <a href={batch.url} download={batch.name}>download {batch.name}</a></p>)}

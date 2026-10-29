@@ -51,7 +51,7 @@ boilerplate. It runs on the desktop or in the browser.
   state-space models, flows), optionally trading accuracy against latency or model size
   on your target device: the result is one Pareto front of networks and classic models
   to choose from. Trials can train several at a time, on any backend.
-- **762 blocks in 9 families** ([docs/FAMILIES.md](docs/FAMILIES.md) lists every
+- **763 blocks in 9 families** ([docs/FAMILIES.md](docs/FAMILIES.md) lists every
   family, task, block and design rule) across every major library: `torch.nn` layers, Keras 3
   equivalents, torchvision / `keras.applications` / timm pretrained backbones,
   Hugging Face text and image encoders, scikit-learn, XGBoost, LightGBM and CatBoost,
@@ -63,6 +63,20 @@ boilerplate. It runs on the desktop or in the browser.
   ArcFace, CosFace, triplet and supervised contrastive losses for embeddings; SAM and
   Schedule-Free AdamW; weight averaging (EMA, SWA); Integrated Gradients; target encoding
   and SMOTE for classic models; Tiny Llama, Vision Transformer, ConvNeXt and ArcFace recipes.
+- **More language models to GGUF, fairness in production (3.12).**
+  - **GGUF:** GPTs and the new **RWKV-7 Stack** export to GGUF as well as Llama-style
+    decoders, in float32 or llama.cpp's 8- and 4-bit formats. LoRA fine-tunes of Llama,
+    Qwen2, Phi-3 and Gemma 3 models export too, merged into their base model. Every file
+    is checked against PyTorch or transformers in llama.cpp when `llama-cpp-python` is
+    installed; the export report says how each file was checked.
+  - **Thresholds per group, in use:** Try it and deployment packages decide each row's
+    class with its group's threshold.
+  - **A whole file:** Try it on a CSV can add each row's smallest change to another class,
+    for its first 500 rows.
+  - **Several GPUs on Modal** (A100 × 2, say), and a GPU check workflow that trains on
+    them.
+
+  ![Thresholds per group in use: Try it decides with east's threshold](docs/images/web_thresholds_in_use.png)
 - **Bigger models, fairer models, GGUF (3.11).** PyTorch networks train in bfloat16,
   shard across GPUs (FSDP) and fine-tune for int8 (quantization-aware training). Several
   GPUs work on Windows and with k-fold and metric losses, and Keras compiles.
