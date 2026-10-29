@@ -67,13 +67,20 @@ def main(argv: list[str] | None = None) -> int:
         return _pipeline_command(args)
     if args.command in ("hub", "kaggle", "tracking"):
         return _tools_command(args)
+    if args.command == "users":
+        try:
+            from ai_made_easy.cli.users import users_command
+        except ImportError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        return users_command(args)
     if args.command == "web":
         try:
             from ai_made_easy.server.app import main as serve_web
         except ImportError as exc:
             print(f"error: {exc} — pip install 'ai-made-easy[web]'", file=sys.stderr)
             return 1
-        serve_web(args.host, args.port, args.open)
+        serve_web(args.host, args.port, args.open, auth=args.auth)
         return 0
 
     if args.command == "budget" and (args.list or not args.project):

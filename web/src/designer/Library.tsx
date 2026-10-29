@@ -27,8 +27,7 @@ export function Library({ onAdd }: { onAdd: (typeId: string) => void }) {
   }, [blocks, query]);
 
   return (
-    <aside className="panel library">
-      <div className="panel-title">Block Library</div>
+    <div className="library-body">
       <input className="search" placeholder={`Search ${blocks.length} blocks`} value={query}
              onChange={(e) => setQuery(e.target.value)} aria-label="Search blocks"
              onKeyDown={(e) => {   // Enter adds the only / first match
@@ -72,6 +71,6 @@ export function Library({ onAdd }: { onAdd: (typeId: string) => void }) {
         {!groups.length && <div className="empty">{blocks.length
           ? <>No blocks match “{query}”.</> : <><span className="spinner" /> Loading blocks…</>}</div>}
       </div>
-    </aside>
+    </div>
   );
 }

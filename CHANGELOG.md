@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+User accounts for the web app, and a dockable workspace in the browser.
+
+### Added
+- **User accounts** (`aime web --auth` or `AIME_WEB_AUTH=1`): sign in with a name
+  and password in the browser. Members work on their own projects; admins manage
+  users (`/api/admin/users`, or the in-app Users dialog) and see every project.
+  Accounts live in `$AIME_HOME/users.json` (PBKDF2 hashes); sessions are signed
+  tokens, valid 14 days. `AIME_WEB_TOKEN` still works next to accounts as a
+  shared admin key. New CLI: `aime users add | list | passwd | role | enable |
+  disable | remove`. Failed sign-ins are throttled; the last enabled admin is
+  protected; a disabled account's open sessions stop working at once.
+- **Dockable panels in the web app**: the Block Library, the Inspector and the
+  bottom console can be dragged to any screen edge or corner, resized from
+  splitters, collapsed to a slim rail and restored (Layout ▸ Reset layout, or
+  the command palette). The arrangement is remembered per browser; under 880 px
+  the panels become drawers over the canvas, so nothing overlaps.
+
+### Changed
+- The web sign-in adds `GET /api/auth/status`, `POST /api/auth/login` and
+  `GET /api/auth/me`; `GET /api/info` now reports `auth_mode`.
+- Saved projects record their owner in a `.owners.json` beside them (admins see
+  an `owner` column in `GET /api/projects`); projects saved before accounts
+  existed stay visible to everyone.
+
 ## 3.11.0
 
 Several GPUs on every platform, bigger models (bfloat16, sharding, quantization-aware

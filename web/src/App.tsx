@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ACTIONS, type ActionDef, matchesKeys } from "./actions";
-import { api } from "./api";
+import { api, type AuthUser } from "./api";
 import { BackendsModal } from "./components/Backends";
 import { CommandPalette, type PaletteMode, ShortcutsSheet } from "./components/CommandPalette";
 import { FileMenu } from "./components/FileMenu";
 import { ImportDialog } from "./components/ImportDialog";
 import { OpenDialog } from "./components/OpenDialog";
+import { LayoutMenu } from "./components/LayoutMenu";
+import { Login } from "./components/Login";
 import { Toasts } from "./components/Toasts";
 import { ToolsModal } from "./components/Tools";
 import { resetTour, Tour, tourDone } from "./components/Tour";
+import { UsersModal } from "./components/UsersModal";
 import { NewProjectWizard } from "./components/Wizard";
 import { Designer } from "./designer/Designer";
+import { DockProvider, useDockState } from "./designer/dock";
 import { downloadCanvas } from "./exportPng";
 import { DataPage } from "./pages/DataPage";
 import { ExperimentsPage } from "./pages/ExperimentsPage";
@@ -23,7 +27,7 @@ import type { DataFacts } from "./types";
 const PAGES = [["design", "Design"], ["data", "Data"], ["experiments", "Experiments"],
                ["models", "Models"]] as const;
 type Page = (typeof PAGES)[number][0];
-type Dialog = "" | "open" | "import" | "new" | "tools" | "backends" | "shortcuts";
+type Dialog = "" | "open" | "import" | "new" | "tools" | "backends" | "shortcuts" | "users";
 
 /** Keys typed into a field belong to the field (Escape and the palette still work). */
 const typing = () => !!(document.activeElement as HTMLElement | null)
@@ -41,6 +45,27 @@ const showTourAtStart = () => !tourDone()
 
 export function App() {
   const store = useStore();
+  const dock = useDockState();
+  const [me, setMe] = useState<AuthUser | null>(null);
+  const [authMode, setAuthMode] = useState("none");
+  const [authChecked, setAuthChecked] = useState(false);
+  useEffect(() => {
+    api.authStatus().then(async (status) => {
+      setAuthMode(status.mode);
+      if (status.mode === "accounts" && status.user) {
+        setMe(status.user);          // a session that is still good
+      } else if (status.mode === "accounts" && localStorage.getItem("aime.token")) {
+        try { setMe(await api.me()); } catch { /* stale token: sign in again */ }
+      }
+      setAuthChecked(true);
+    }).catch(() => setAuthChecked(true));
+  }, []);
+  // any later 401 (a disabled account, an expired session) brings the sign-in back
+  useEffect(() => {
+    const ask = () => { api.clearToken(); setMe(null); };
+    window.addEventListener("aime.unauthorized", ask);
+    return () => window.removeEventListener("aime.unauthorized", ask);
+  }, []);
   const { name, setName, project, notify, theme, toggleTheme, version, validation, nodes,
           dataIssues, undo, redo, duplicateSelection, groupSelection, copySelection, arrange,
           canvas, load, restored, discardRestored } = store;
@@ -130,6 +155,10 @@ export function App() {
     "view.zoom_out": () => onCanvas(() => canvas.current?.zoomOut()),
     "view.zoom_fit": () => onCanvas(() => canvas.current?.fit()),
     "view.theme": toggleTheme,
+    "view.panel_library": () => dock.toggle("library"),
+    "view.panel_inspector": () => dock.toggle("inspector"),
+    "view.panel_console": () => dock.toggle("console"),
+    "view.reset_layout": () => { dock.reset(); notify("Panels back to the default layout"); },
     "go.design": () => setPage("design"),
     "go.data": () => setPage("data"),
     "go.experiments": () => setPage("experiments"),
@@ -140,7 +169,7 @@ export function App() {
     "help.shortcuts": () => setDialog("shortcuts"),
     "help.tour": () => { resetTour(); setPage("design"); setTour(true); },
   }), [save, download, onCanvas, nodes.length, notify, canvas, name, undo, redo, copySelection,
-       duplicateSelection, groupSelection, arrange, toggleTheme]);
+       duplicateSelection, groupSelection, arrange, toggleTheme, dock]);
   const run = useCallback((id: string) => handlers[id]?.(), [handlers]);
   const available: ActionDef[] = useMemo(() => ACTIONS.filter((a) => handlers[a.id]), [handlers]);
 
@@ -171,11 +200,19 @@ export function App() {
 
   const errors = validation?.issues.filter((i) => i.severity === "error").length ?? 0;
   const warnings = (validation?.issues.length ?? 0) - errors + dataIssues.length;
+  if (authMode === "accounts" && authChecked && !me) {
+    return (<>
+      <Login onSignedIn={(user) => setMe(user)} />
+      <Toasts />
+    </>);
+  }
   return (
+    <DockProvider value={dock}>
     <div className="app">
       <header className="topbar">
         <div className="brand">AI <span>Made Easy</span></div>
         <FileMenu run={run} openRecent={openRecent} />
+        <LayoutMenu />
         <nav className="nav" aria-label="Pages">
           {PAGES.map(([id, label]) => (
             <button key={id} className={page === id ? "active" : ""} onClick={() => setPage(id)}
@@ -199,6 +236,17 @@ export function App() {
         <button className="ghost" onClick={toggleTheme} aria-label="Toggle theme"
                 title={theme === "dark" ? "Light theme" : "Dark theme"}>
           {theme === "dark" ? "☀" : "☾"}</button>
+        {authMode === "accounts" && me && (
+          <span className="user-chip" data-testid="user-chip"
+                title={`Signed in as ${me.name} (${me.role})`}>
+            {me.name} · {me.role}
+          </span>)}
+        {authMode === "accounts" && me?.role === "admin" && (
+          <button onClick={() => setDialog("users")} data-testid="open-users"
+                  title="Manage user accounts">Users</button>)}
+        {authMode === "accounts" && me && (
+          <button className="ghost" onClick={() => { api.clearToken(); setMe(null); }}
+                  data-testid="sign-out">Sign out</button>)}
       </header>
       {restored && (
         <div className="banner" role="region" aria-label="Restored design" data-testid="restored">
@@ -229,6 +277,7 @@ export function App() {
         onUseData={(d) => { setStartFacts(d.facts); setDialog("new"); }} />}
       {dialog === "backends" && <BackendsModal onClose={() => setDialog("")} />}
       {dialog === "shortcuts" && <ShortcutsSheet actions={available} onClose={() => setDialog("")} />}
+      {dialog === "users" && me && <UsersModal me={me.name} onClose={() => setDialog("")} />}
       {dialog === "new" && <NewProjectWizard initialFacts={startFacts}
         onClose={() => { setDialog(""); setStartFacts(null); }}
         onCreated={() => { setDialog(""); setStartFacts(null); setPage("design"); }}
@@ -238,5 +287,6 @@ export function App() {
       {tour && page === "design" && !dialog && <Tour onClose={() => setTour(false)} />}
       <Toasts />
     </div>
+    </DockProvider>
   );
 }
