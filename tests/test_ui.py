@@ -211,6 +211,20 @@ def test_switching_themes_keeps_the_style(ctx, app):
     ctx.act_theme_light()
     ctx.act_theme_dark()
     assert shiboken6.isValid(before) and app.style() is before
+    sheet = app.styleSheet()
+    restyled = []
+
+    class Probe(QtWidgets.QWidget):
+        def changeEvent(self, event):  # noqa: ANN001, N802 (Qt name)
+            restyled.append(event.type())
+
+    probe = Probe()
+    app.processEvents()
+    restyled.clear()
+    ctx.theme.apply(app, ctx.theme.active())        # a second window, the same theme
+    app.processEvents()
+    assert app.styleSheet() == sheet and not restyled
+    probe.deleteLater()
 
 
 def test_theme_switch_updates_canvas_tokens(ctx, app):
