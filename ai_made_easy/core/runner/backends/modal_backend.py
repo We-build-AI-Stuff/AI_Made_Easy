@@ -99,7 +99,8 @@ def _count(value) -> int:  # noqa: ANN001
     if isinstance(value, int):
         return value
     text = str(value).strip()
-    return int(text) if text.isdigit() else 0
+    # isdecimal, not isdigit: "²" is a digit that int() can't read
+    return int(text) if text.isascii() and text.isdecimal() else 0
 
 
 class ModalBackend(RemoteBackend):

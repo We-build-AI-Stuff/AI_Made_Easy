@@ -381,7 +381,7 @@ def test_modal_asks_for_several_gpus(manager, monkeypatch):
     assert result["record"].remote["accelerator"] == {"gpu": "A100:2", "count": 2,
                                                       "device": "a100_40"}
     for bad in ({"gpu_count": 9}, {"gpu_count": "two"}, {"gpu_count": 0},
-                {"gpu_count": 2.9}, {"gpu_count": "2.9"}, {"gpu": "none", "gpu_count": 2}):
+                {"gpu_count": 2.9}, {"gpu_count": "2.9"}, {"gpu_count": "²"}, {"gpu": "none", "gpu_count": 2}):
         with pytest.raises(backends.BackendError, match="gpu_count must be a whole number"):
             ModalBackend("m", **bad)
     with pytest.raises(backends.BackendError, match="A10G machines have 4"):
