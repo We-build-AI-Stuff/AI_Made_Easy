@@ -250,8 +250,13 @@ class ThemeService:
                           (QtGui.QPalette.ColorRole.ToolTipText, "TEXT"),
                           (QtGui.QPalette.ColorRole.PlaceholderText, "TEXT_MUTED")):
             palette.setColor(role, QtGui.QColor(t[key]))
-        app.setPalette(palette)
-        app.setStyleSheet(_build_qss(t))
+        # only when they change: setting either re-styles every widget, a closing window's
+        # too, which crashed opening a second window with the same theme
+        if app.palette() != palette:
+            app.setPalette(palette)
+        qss = _build_qss(t)
+        if app.styleSheet() != qss:
+            app.setStyleSheet(qss)
         from ai_made_easy.ui import icons
 
         icons.set_color(t["TEXT_DIM"], t["ACCENT_TEXT"])
