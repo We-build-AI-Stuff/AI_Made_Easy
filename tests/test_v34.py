@@ -555,4 +555,7 @@ def test_desktop_a_moved_folded_card_reopens_where_it_was_moved(desk):
     assert card.folded
     assert canvas.set_group_collapsed(card, False)
     reopened = sorted(tuple(n.pos()) for n in canvas.group_members(card))
-    assert reopened == pytest.approx(sorted((x + 400, y + 250) for x, y in before.values()))
+    wanted = sorted((x + 400, y + 250) for x, y in before.values())
+    assert len(reopened) == len(wanted)
+    for got, want in zip(reopened, wanted, strict=True):   # pytest 9: approx isn't nested
+        assert got == pytest.approx(want)
