@@ -383,6 +383,9 @@ def write_gguf(model_dir: Path, path: Path, quant: str = "") -> dict:
 
 # ------------------------------------------------------------------ check
 
+CHECK_SECONDS = 1800
+
+
 def check(model_dir: Path, path: Path, quant: str = "") -> dict:
     """llama.cpp against transformers, in another process: llama.cpp stops the whole
     process when a file is wrong, and this may run inside the app's server."""
@@ -390,9 +393,14 @@ def check(model_dir: Path, path: Path, quant: str = "") -> dict:
 
     from ai_made_easy.core.runner.manager import python_executable
 
-    done = subprocess.run([python_executable(), "-m", "ai_made_easy.core.deploy.hf_gguf",
-                           str(model_dir), str(path), quant], capture_output=True,
-                          encoding="utf-8", errors="replace", timeout=1800, check=False)
+    try:
+        done = subprocess.run([python_executable(), "-m", "ai_made_easy.core.deploy.hf_gguf",
+                               str(model_dir), str(path), quant], capture_output=True,
+                              encoding="utf-8", errors="replace", timeout=CHECK_SECONDS,
+                              check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise HfGgufError(f"checking the file in llama.cpp took over "
+                          f"{CHECK_SECONDS // 60} minutes") from exc
     lines = [ln for ln in done.stdout.splitlines() if ln.startswith("{")]
     if done.returncode != 0 or not lines:
         why = (done.stderr.strip().splitlines() or ["no message"])[-1]
@@ -449,8 +457,12 @@ def _check(model_dir: Path, path: Path, quant: str = "") -> dict:
 
 def export(model_dir: Path, out: Path, quant: str = "") -> dict:
     """Write and check ``out``; the report says what went in and how it was checked."""
-    info = write_gguf(model_dir, out, quant)
-    result = check(model_dir, out, quant)
+    try:
+        info = write_gguf(model_dir, out, quant)
+        result = check(model_dir, out, quant)
+    except BaseException:
+        out.unlink(missing_ok=True)   # no file that llama.cpp reads differently is left behind
+        raise
     size = f", {info['size']:.0%} of the float size" if quant else ""
     return {"ok": True, "file": str(out), "family": info["family"], **result,
             "note": f"{info['family']}, {info['tokenizer']} tokenizer{size}; {result['note']}"}
@@ -459,6 +471,17 @@ def export(model_dir: Path, out: Path, quant: str = "") -> dict:
 # ------------------------------------------------------------------ runs
 
 QUANTS = {"": "", "f32": "", "q8_0": "Q8_0", "q4_0": "Q4_0"}
+NEEDS = ("torch", "transformers", "peft", "gguf", "safetensors")
+
+
+def _require() -> None:
+    """Every package the export uses, checked before the base model downloads."""
+    from importlib.util import find_spec
+
+    missing = [name for name in NEEDS if find_spec(name) is None]
+    if missing:
+        raise HfGgufError(f"GGUF export needs {', '.join(missing)}: pip install "
+                          f"'ai-made-easy[gguf,llm]'")
 
 
 def export_run(run_dir: Path, out_dir: Path, quant: str = "") -> dict:
@@ -469,6 +492,7 @@ def export_run(run_dir: Path, out_dir: Path, quant: str = "") -> dict:
     if quant.lower() not in QUANTS:
         raise HfGgufError(f"quant must be one of {', '.join(q for q in QUANTS if q)}")
     quant = QUANTS[quant.lower()]
+    _require()
     record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     nodes = (record.get("graph") or {}).get("nodes", [])
     model = next((n for n in nodes if n.get("type") == "llm.model"), None)
