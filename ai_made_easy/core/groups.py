@@ -407,6 +407,11 @@ def adopt(mgr, groups_run: str) -> dict:  # noqa: ANN001
     if not fitted.is_file():
         raise GroupsError("this result has no thresholds per group: they are fitted for "
                           "two-class classifiers whose groups have enough positives")
+    result = mgr.history.path(groups_run) / RESULT
+    how = json.loads(result.read_text(encoding="utf-8")).get("how") if result.is_file() else None
+    if how == "quartiles":
+        raise GroupsError("these groups are quartiles of a number, and a row's own value "
+                          "can't be matched to them: score by a column of categories")
     mgr.history.get(source)   # an unknown run raises here
     shutil.copy2(fitted, mgr.history.path(source) / THRESHOLDS)
     return {"run_id": source, "from": groups_run,

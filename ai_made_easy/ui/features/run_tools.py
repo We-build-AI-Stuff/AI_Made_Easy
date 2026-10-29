@@ -266,7 +266,8 @@ class GroupsDialog(QtWidgets.QDialog):
                                         f"on {key}.")
         fair = result.get("fairness")
         self.fairness.setText(f"Fairness: {fair['summary']}" if fair else "")
-        self._show_thresholds(result.get("mitigation"), result.get("column", "Group"))
+        self._show_thresholds(result.get("mitigation"), result.get("column", "Group"),
+                              binned=result.get("how") == "quartiles")
         self.table.setHorizontalHeaderLabels([result.get("column", "Group"), "Rows", key,
                                               "vs all"])
         rows = [{"value": "all test rows", **result.get("overall", {})}, *result["groups"]]
@@ -285,7 +286,7 @@ class GroupsDialog(QtWidgets.QDialog):
                     item.setFont(font)
                 self.table.setItem(i, j, item)
 
-    def _show_thresholds(self, found: dict | None, column: str) -> None:
+    def _show_thresholds(self, found: dict | None, column: str, binned: bool = False) -> None:
         """A threshold per group: each group's rates at 0.5, then with its threshold."""
         self.thresholds.setVisible(bool(found))
         if not found:
@@ -296,8 +297,10 @@ class GroupsDialog(QtWidgets.QDialog):
             f"A threshold per group: {found.get('summary', '')}\nBefore → after, on "
             f"{found['before']['overall']['count']} rows the thresholds were not fitted on. "
             f"Using them, Try it and the run's packages decide each row with its {column}'s "
-            "threshold (requests then include the column).")
-        self._show_use(True)
+            "threshold (requests then include the column)." + (
+                "\nThese groups are quartiles of a number, so a row can't be matched to "
+                "them: score by a column of categories to use thresholds." if binned else ""))
+        self._show_use(not binned)
         self.thresholds.setHorizontalHeaderLabels(
             [column, "Threshold", "True positives", "False positives", "Accuracy"])
 

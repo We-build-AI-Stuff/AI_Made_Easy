@@ -644,3 +644,81 @@ def test_a_files_predictions_can_say_what_would_change_each(isolated_home, tmp_p
     finally:
         api.try_service().close()
         api.set_manager(None)
+
+
+def _group_cut(template: str):  # noqa: ANN202
+    """group_cut as the generated inference code defines it."""
+    source = template[template.index("def group_cut("):template.index("def with_group_thresholds(")]
+    space: dict = {}
+    exec(source, space)  # noqa: S102 — the repository's own template
+    return space["group_cut"]
+
+
+def test_a_row_finds_its_group_however_its_value_was_read():
+    """Training keys groups by str(value) and "(missing)"; a CSV can read 1 as 1.0."""
+    from ai_made_easy.core.classic.template import SKLEARN_TEMPLATE
+    from ai_made_easy.core.training.inference_template import INFERENCE_COMMON
+
+    for template in (INFERENCE_COMMON, SKLEARN_TEMPLATE):
+        cut = _group_cut(template)
+        cuts = {"1": 0.3, "2.0": 0.4, "(missing)": 0.2, "east": 0.6}
+        assert cut({"g": 1.0}, "g", cuts, 0.5) == (0.3, "1")
+        assert cut({"g": 2}, "g", cuts, 0.5) == (0.4, "2.0")
+        assert cut({"g": float("nan")}, "g", cuts, 0.5) == (0.2, "(missing)")
+        assert cut({"g": None}, "g", cuts, 0.5) == (0.2, "(missing)")
+        assert cut({"g": "east"}, "g", cuts, 0.5) == (0.6, "east")
+        assert cut({"g": "west"}, "g", cuts, 0.5) == (0.5, "west")
+        assert cut({"a": 1}, "g", cuts, 0.5) == (0.5, None)
+
+
+def test_thresholds_for_quartiles_of_a_number_are_not_adopted(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from ai_made_easy.core import groups
+
+    scoring, scored = tmp_path / "g1", tmp_path / "r1"
+    scoring.mkdir()
+    scored.mkdir()
+    (scoring / groups.THRESHOLDS).write_text('{"column": "age", "thresholds": {}}',
+                                             encoding="utf-8")
+    (scoring / groups.RESULT).write_text('{"column": "age", "how": "quartiles"}',
+                                         encoding="utf-8")
+    monkeypatch.setattr(groups, "_scored", lambda mgr, run: "r1")
+    mgr = SimpleNamespace(history=SimpleNamespace(path=lambda run: tmp_path / run,
+                                                  get=lambda run: None))
+    with pytest.raises(groups.GroupsError, match="quartiles of a number"):
+        groups.adopt(mgr, "g1")
+    assert not (scored / groups.THRESHOLDS).exists()
+
+
+def test_a_files_changes_keep_the_group_and_work_on_a_scikit_learn_dataset(tmp_path,
+                                                                          monkeypatch):
+    """The search asks about whole rows, so a column the model doesn't read (the group
+    that picks a threshold) is still there; a scikit-learn dataset gives the values."""
+    pytest.importorskip("sklearn")
+    from types import SimpleNamespace
+
+    from ai_made_easy.core import counterfactual, tryit
+
+    record = {"graph": {"nodes": [{"type": "data.sklearn", "params": {"dataset": "iris"}}]}}
+    frame = counterfactual._frame(record)
+    assert "petal length (cm)" in frame.columns and len(frame) == 150
+    seen = []
+
+    def ask(rows, timeout=0):  # noqa: ANN001, ANN202
+        seen.extend(rows)
+        return [{"label": "b" if r["x"] > 5 else "a",
+                 "probabilities": {"a": 0.0 if r["x"] > 5 else 1.0,
+                                   "b": 1.0 if r["x"] > 5 else 0.0}} for r in rows]
+
+    worker = SimpleNamespace(ask=ask, signature={"columns": ["x"]})
+    monkeypatch.setattr(tryit, "_target", lambda *a: (worker, {"input_kind": "records"}))
+    monkeypatch.setattr(counterfactual, "_frame",
+                        lambda record: __import__("pandas").DataFrame({"x": range(10)}))
+    (tmp_path / "run.json").write_text("{}", encoding="utf-8")
+    history = SimpleNamespace(get=lambda run: None, path=lambda run: tmp_path)
+    out = counterfactual.for_rows(None, history, "r1", [{"x": 1, "region": "east"}])
+    assert out[0]["change_predicts"] == "b" and out[0]["smallest_change"].startswith("x 1 →")
+    assert seen and all(r["region"] == "east" for r in seen)
+    assert counterfactual.describe_change({"single": [], "combined": None})[0] == \
+        "no change found"

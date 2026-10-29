@@ -129,7 +129,7 @@ export function GroupsModal({ run, onClose }: { run: RunRecord; onClose: () => v
             <p data-testid="fairness"><b className={result.fairness.flagged.length ? "sev-warning" : ""}>
               Fairness:</b> {result.fairness.summary}</p>)}
           {result.mitigation && <Thresholds m={result.mitigation} column={result.column ?? ""}
-            scoring={result.run_id} run={run.run_id} />}
+            scoring={result.run_id} run={run.run_id} binned={result.how === "quartiles"} />}
         </div>)}
     </Modal>
   );
@@ -138,8 +138,8 @@ export function GroupsModal({ run, onClose }: { run: RunRecord; onClose: () => v
 const pct = (v: number | null | undefined) => (typeof v === "number" ? `${(v * 100).toFixed(0)}%` : "—");
 
 /** A threshold per group: each group's rates at 0.5 and with its own threshold. */
-function Thresholds({ m, column, scoring, run }:
-  { m: Mitigation; column: string; scoring: string; run: string }) {
+function Thresholds({ m, column, scoring, run, binned }:
+  { m: Mitigation; column: string; scoring: string; run: string; binned?: boolean }) {
   const { notify } = useStore();
   const after = new Map(m.after.groups.map((g) => [g.value, g]));
   const [inUse, setInUse] = useState<GroupThresholds | null>(null);
@@ -186,13 +186,15 @@ function Thresholds({ m, column, scoring, run }:
         not fitted on. Using them, the run's Try it and its deployment packages predict the
         positive class when its probability reaches the row's group threshold; requests
         then include each row's {column}.</p>
-      <div className="row" data-testid="thresholds-use">
+      {binned ? <p className="dim" data-testid="thresholds-binned">These groups are
+        quartiles of a number, so a row can't be matched to them: score by a column of
+        categories to use thresholds.</p> : <div className="row" data-testid="thresholds-use">
         {inUse
           ? <><span className="chip">in use, by {inUse.column}</span>{" "}
             <button onClick={stop} data-testid="thresholds-stop">Stop using them</button></>
           : <button className="primary" onClick={use} data-testid="thresholds-adopt">
             Use these thresholds</button>}
-      </div>
+      </div>}
     </div>
   );
 }
