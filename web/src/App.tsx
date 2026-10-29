@@ -66,6 +66,7 @@ export function App() {
     window.addEventListener("aime.unauthorized", ask);
     return () => window.removeEventListener("aime.unauthorized", ask);
   }, []);
+  const { refreshCatalog } = store;   // the boot fetch ran before sign-in (401s)
   const { name, setName, project, notify, theme, toggleTheme, version, validation, nodes,
           dataIssues, undo, redo, duplicateSelection, groupSelection, copySelection, arrange,
           canvas, load, restored, discardRestored } = store;
@@ -202,7 +203,7 @@ export function App() {
   const warnings = (validation?.issues.length ?? 0) - errors + dataIssues.length;
   if (authMode === "accounts" && authChecked && !me) {
     return (<>
-      <Login onSignedIn={(user) => setMe(user)} />
+      <Login onSignedIn={(user) => { setMe(user); refreshCatalog(); }} />
       <Toasts />
     </>);
   }

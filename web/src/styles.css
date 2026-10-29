@@ -189,13 +189,13 @@ tbody tr:hover td { background: var(--hover); }
 .dock-rail:hover { background: var(--hover); color: var(--text); }
 
 /* splitters between the canvas and a column, and between stacked panels */
-.dock-resizer { flex: none; z-index: 5; }
+.dock-resizer { flex: none; z-index: 5; touch-action: none; }
 .resizer-left, .resizer-right { width: 5px; cursor: col-resize; }
 .resizer-left { margin-right: -3px; }
 .resizer-right { margin-left: -3px; }
 .resizer-bottom { height: 5px; cursor: row-resize; margin-top: -3px; }
 .dock-splitter { flex: none; height: 5px; cursor: row-resize; margin-bottom: -3px;
-                 z-index: 4; }
+                 z-index: 4; touch-action: none; }
 .dock-splitter.vertical { width: 5px; height: auto; cursor: col-resize; margin: 0 0 0 -3px; }
 .dock-resizer:hover, .dock-splitter:hover { background: color-mix(in srgb, var(--accent) 45%,
                                                    transparent); }

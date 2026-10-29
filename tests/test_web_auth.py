@@ -16,16 +16,17 @@ from fastapi.testclient import TestClient  # noqa: E402
 from ai_made_easy.core import api  # noqa: E402
 from ai_made_easy.core.runner.manager import RunManager  # noqa: E402
 from ai_made_easy.core.runs.history import RunHistory  # noqa: E402
-from ai_made_easy.server.app import create_app  # noqa: E402
+from ai_made_easy.server.app import auth_enabled, create_app  # noqa: E402
 from ai_made_easy.server.users import (  # noqa: E402
+    LoginThrottle,
     User,
     UserError,
     UserStore,
+    hash_password,
     issue_token,
     load_secret,
     read_token,
     verify_password,
-    hash_password,
 )
 
 
@@ -243,3 +244,78 @@ def test_auth_off_changes_nothing(isolated_home, tmp_path):
         assert c.put("/api/projects/open", json=tiny_classifier_dict()).status_code == 200
         assert [p["name"] for p in c.get("/api/projects").json()["projects"]] == ["open"]
     api.manager().stop_all()
+
+
+# ==================================================== CodeRabbit review round
+
+def test_demotion_takes_effect_at_once(client, isolated_home):
+    """CR #1: the role comes from the store, not from the session token."""
+    path = isolated_home / "users.json"
+    _add(path, "root", "pw-root", "admin")
+    _add(path, "bee", "pw-bee", "admin")
+    _login(client, "bee", "pw-bee")
+    assert client.get("/api/admin/users").status_code == 200        # still an admin
+    UserStore(path).set_role("bee", "member")
+    assert client.get("/api/auth/me").json()["role"] == "member"    # at once, same token
+    assert client.get("/api/admin/users").status_code == 403
+    assert client.get("/api/projects").status_code == 200           # still signed in
+
+
+def test_admin_save_does_not_steal_ownership(client, isolated_home):
+    """CR #2: an admin (or the owner) saving a project leaves its owner alone."""
+    path = isolated_home / "users.json"
+    _add(path, "root", "pw-root", "admin")
+    _add(path, "ada", "pw-ada")
+    _login(client, "ada", "pw-ada")
+    client.put("/api/projects/adas", json=tiny_classifier_dict())
+    _login(client, "root", "pw-root")
+    client.put("/api/projects/adas", json=tiny_classifier_dict())   # admin saves it
+    owners = client.get("/api/projects").json()["projects"]
+    assert next(p for p in owners if p["name"] == "adas")["owner"] == "ada"
+    # and the member still sees and saves their project afterwards
+    _login(client, "ada", "pw-ada")
+    assert client.get("/api/projects/adas").status_code == 200
+    assert client.put("/api/projects/adas", json=tiny_classifier_dict()).status_code == 200
+
+
+def test_web_auth_env_var_is_honoured(isolated_home, monkeypatch):
+    """CR #3: `aime web` without --auth must still see AIME_WEB_AUTH=1."""
+    assert auth_enabled(False) is False           # an explicit flag always wins
+    assert auth_enabled(True) is True
+    monkeypatch.setenv("AIME_WEB_AUTH", "1")
+    assert auth_enabled(None) is True             # what `aime web` resolves
+    monkeypatch.setenv("AIME_WEB_AUTH", "nope")
+    assert auth_enabled(None) is False
+
+
+def test_the_name_token_is_reserved(isolated_home):
+    """CR #4: 'token' is the shared key's identity; nobody may be called that."""
+    store = UserStore(isolated_home / "users.json")
+    with pytest.raises(UserError):
+        store.add("token", "pw-token")
+    with pytest.raises(UserError):
+        store.add("Token", "pw-token")
+
+
+def test_credential_files_are_owner_only(isolated_home):
+    """CR #6: users.json and web_secret.key are created 0600 where the os allows."""
+    import sys
+
+    store = UserStore(isolated_home / "users.json")
+    store.add("ada", "pw-ada")
+    load_secret(isolated_home / "web_secret.key")
+    for name in ("users.json", "web_secret.key"):
+        mode = (isolated_home / name).stat().st_mode
+        if sys.platform != "win32":          # Windows ignores the mode bits
+            assert mode & 0o777 == 0o600, name
+
+
+def test_throttle_memory_is_bounded(isolated_home):
+    """CR #7: random names cannot grow the throttle without bound."""
+    throttle = LoginThrottle(max_names=8)
+    for i in range(50):
+        throttle.record_failure(f"name-{i}")
+    assert len(throttle._fails) <= 8          # noqa: SLF001 — the cap is the contract
+    for _ in range(5):                        # the newest name is still tracked, and
+        throttle.record_failure("name-49")    # still locks out after enough failures
+    assert throttle.blocked("name-49") > 0

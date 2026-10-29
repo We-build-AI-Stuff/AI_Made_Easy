@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import threading
@@ -47,6 +48,9 @@ def hash_password(password: str, *, iterations: int = ITERATIONS) -> str:
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
     return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
+
+
+_DUMMY_HASH: list[str] = []    # computed on first use: import must stay cheap
 
 
 def verify_password(password: str, stored: str) -> bool:
@@ -105,7 +109,7 @@ class UserStore:
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(f"{self.path.stem}.{secrets.token_hex(4)}.tmp")
-        tmp.write_text(json.dumps(self._users, indent=1), encoding="utf-8")
+        _write_private(tmp, json.dumps(self._users, indent=1))
         tmp.replace(self.path)
         try:
             self._mtime = self.path.stat().st_mtime
@@ -122,9 +126,10 @@ class UserStore:
     def add(self, name: str, password: str, role: str = "member") -> User:
         self._reload_if_changed()
         name = name.strip()
-        if not NAME.match(name):
+        if not NAME.match(name) or name.lower() == "token":
             raise UserError("user names may use letters, digits, spaces, '_', '-' and '.' "
-                            "(32 characters at most)")
+                            "(32 characters at most) — and not 'token', which is the "
+                            "shared access key")
         if role not in ROLES:
             raise UserError(f"role must be one of {', '.join(ROLES)}")
         with self._lock:
@@ -141,8 +146,11 @@ class UserStore:
         with self._lock:
             record = self._users.get(name.strip())
         if not record or record.get("disabled"):
-            # hash anyway, so a missing name takes as long as a wrong password
-            verify_password(password or "", record.get("hash", "") if record else "x$1$00$00")
+            # hash anyway, so a missing or disabled name takes as long as a wrong
+            # password: login timing must not reveal which names exist
+            if not _DUMMY_HASH:
+                _DUMMY_HASH.append(hash_password("timing-equalizer"))
+            verify_password(password or "", record.get("hash", "") if record else _DUMMY_HASH[0])
             return None
         if not verify_password(password or "", record.get("hash", "")):
             return None
@@ -229,6 +237,13 @@ def _unb64(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
+def _write_private(path: Path, text: str) -> None:
+    """Create ``path`` owner-only (0600): credential files must not be world-readable."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
 def load_secret(path: str | Path) -> bytes:
     """The signing key at ``path``, created (once) when missing."""
     path = Path(path)
@@ -237,7 +252,7 @@ def load_secret(path: str | Path) -> bytes:
     path.parent.mkdir(parents=True, exist_ok=True)
     secret = secrets.token_bytes(32)
     tmp = path.with_name(f"{path.stem}.{secrets.token_hex(4)}.tmp")
-    tmp.write_text(secret.hex(), encoding="utf-8")
+    _write_private(tmp, secret.hex())
     tmp.replace(path)
     return secret
 
@@ -271,11 +286,24 @@ def read_token(secret: bytes, token: str) -> User | None:
 class LoginThrottle:
     """Locks a name out for ``lockout`` seconds after ``max_failures`` bad passwords."""
 
-    def __init__(self, max_failures: int = 5, lockout: float = 60.0) -> None:
+    def __init__(self, max_failures: int = 5, lockout: float = 60.0,
+                 max_names: int = 512) -> None:
         self.max_failures = max_failures
         self.lockout = lockout
-        self._fails: dict[str, list[float]] = {}
+        self.max_names = max_names     # an attacker posting random names must not
+        self._fails: dict[str, list[float]] = {}   # grow this without bound
         self._lock = threading.Lock()
+
+    def _prune_all_locked(self, now: float) -> None:
+        for name in list(self._fails):
+            recent = [t for t in self._fails[name] if now - t < self.lockout]
+            if recent:
+                self._fails[name] = recent
+            else:
+                del self._fails[name]
+        while len(self._fails) >= self.max_names:    # drop the least recently used
+            oldest = min(self._fails, key=lambda n: self._fails[n][0])
+            del self._fails[oldest]
 
     def _prune(self, name: str, now: float) -> list[float]:
         recent = [t for t in self._fails.get(name, []) if now - t < self.lockout]
@@ -296,6 +324,7 @@ class LoginThrottle:
     def record_failure(self, name: str) -> None:
         with self._lock:
             now = time.time()
+            self._prune_all_locked(now)
             recent = [t for t in self._fails.get(name, []) if now - t < self.lockout]
             recent.append(now)
             self._fails[name] = recent

@@ -114,7 +114,13 @@ export function useDock(): DockApi {
 
 export function useDockState(): DockApi {
   const [layout, setLayout] = useState<DockLayout>(load);
-  useEffect(() => { localStorage.setItem(KEY, JSON.stringify(layout)); }, [layout]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(KEY, JSON.stringify(layout));
+    } catch (e) {
+      console.warn("could not save the panel layout:", e);   // keep the in-memory one
+    }
+  }, [layout]);
 
   const move = useCallback((panel: PanelId, side: Side, index: number) => {
     setLayout((l) => {
@@ -202,32 +208,41 @@ export function DockHost({ canvas, panels, classNames }: {
 
   const startDrag = (panel: PanelId) => (e: ReactPointerEvent<HTMLElement>) => {
     if (compact || e.button !== 0) return;
+    if ((e.target as HTMLElement).closest("button")) return;   // a click, not a drag
     const root = workspace.current;
     if (!root) return;
     const rects = Array.from(root.querySelectorAll<HTMLElement>("[data-dock-panel]"))
       .map((el) => ({ side: (el.dataset.dockSide ?? "left") as Side,
                       panel: el.dataset.dockPanel as PanelId,
                       box: el.getBoundingClientRect() }));
+    const x0 = e.clientX, y0 = e.clientY;
+    let moved = false;                        // a plain header click docks nothing
     const track = (ev: PointerEvent) => {
+      if (!moved && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 4) return;
+      moved = true;
       const rect = root.getBoundingClientRect();
       setDrag((d) => d ? { ...d, x: ev.clientX, y: ev.clientY,
                            zone: zoneAt(ev.clientX, ev.clientY, rect, rects) } : d);
     };
-    const up = (ev: PointerEvent) => {
+    const finish = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", track);
-      window.removeEventListener("pointerup", up);
-      const zone = zoneAt(ev.clientX, ev.clientY, root.getBoundingClientRect(), rects);
-      if (zone) move(panel, zone.side, zone.index);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      if (moved && ev.type === "pointerup") {   // only a real drag re-docks
+        const zone = zoneAt(ev.clientX, ev.clientY, root.getBoundingClientRect(), rects);
+        if (zone) move(panel, zone.side, zone.index);
+      }
       setDrag(null);
     };
     window.addEventListener("pointermove", track);
-    window.addEventListener("pointerup", up);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
     setDrag({ panel, x: e.clientX, y: e.clientY, rects, zone: null });
   };
 
-  const renderPanel = (panel: PanelId, side: Side) => (
-    <DockPanel key={panel} panel={panel} side={side} onDragStart={startDrag(panel)}
-               className={classNames?.[panel]}>
+  const renderPanel = (panel: PanelId, side: Side, fill = false) => (
+    <DockPanel key={panel} panel={panel} side={side} fill={fill}
+               onDragStart={startDrag(panel)} className={classNames?.[panel]}>
       {panels[panel]}
     </DockPanel>
   );
@@ -244,11 +259,13 @@ export function DockHost({ canvas, panels, classNames }: {
            style={{ width }} data-dock-side={side}
            aria-label={side === "left" ? "Left panels" : "Right panels"}>
         {open.flatMap((p, i) => i < open.length - 1
-          ? [<DockPanel key={p} panel={p} side={side} onDragStart={startDrag(p)}
-                        className={classNames?.[p]}>{panels[p]}</DockPanel>,
+          ? [<DockPanel key={p} panel={p} side={side} fill={false}
+                        onDragStart={startDrag(p)} className={classNames?.[p]}>
+               {panels[p]}</DockPanel>,
              <PanelSplitter key={`split-${p}`} after={p} />]
-          : [<DockPanel key={p} panel={p} side={side} onDragStart={startDrag(p)}
-                        className={classNames?.[p]}>{panels[p]}</DockPanel>])}
+          : [<DockPanel key={p} panel={p} side={side} fill
+                        onDragStart={startDrag(p)} className={classNames?.[p]}>
+               {panels[p]}</DockPanel>])}
         {rails.map((p) => <CollapsedRail key={p} panel={p} side={side} />)}
       </div>
     );
@@ -265,8 +282,9 @@ export function DockHost({ canvas, panels, classNames }: {
                style={{ height: compact ? undefined : layout.bottomHeight }}>
         <div className="dock-bottom-row">
           {open.flatMap((p, i) => i < open.length - 1
-            ? [renderPanel(p, "bottom"), <PanelSplitter key={`split-${p}`} after={p} vertical />]
-            : [renderPanel(p, "bottom")])}
+            ? [renderPanel(p, "bottom"),
+               <PanelSplitter key={`split-${p}`} after={p} vertical />]
+            : [renderPanel(p, "bottom", true)])}
           {rails.map((p) => <CollapsedRail key={p} panel={p} side="bottom" />)}
         </div>
       </section>
@@ -328,14 +346,15 @@ export function DockHost({ canvas, panels, classNames }: {
 
 // ------------------------------------------------------------------ pieces
 
-function DockPanel({ panel, side, onDragStart, className, children }: {
+function DockPanel({ panel, side, onDragStart, className, fill = false, children }: {
   panel: PanelId; side: Side; onDragStart: (e: ReactPointerEvent<HTMLElement>) => void;
-  className?: string; children: ReactNode;
+  className?: string; fill?: boolean; children: ReactNode;
 }) {
   const { layout, toggle } = useDock();
-  const style: CSSProperties = side === "bottom"
-    ? { flex: `0 0 ${layout.panelSize[panel]}px`, minWidth: 0 }
-    : { flex: `0 0 ${layout.panelSize[panel]}px`, minHeight: 0 };
+  const basis = fill ? "1 1 0" : `0 0 ${layout.panelSize[panel]}px`;  // the last panel
+  const style: CSSProperties = side === "bottom"                     // fills its stack
+    ? { flex: basis, minWidth: 0 }
+    : { flex: basis, minHeight: 0 };
   return (
     <aside className={`panel dock-panel ${className ?? ""}`} style={style}
            data-dock-panel={panel} data-dock-side={side}>
@@ -398,11 +417,13 @@ function listen(drag: (ev: PointerEvent) => void) {
   const up = () => {
     window.removeEventListener("pointermove", drag);
     window.removeEventListener("pointerup", up);
-    document.body.classList.remove("dock-resizing");
+    window.removeEventListener("pointercancel", up);   // a touch gesture the browser
+    document.body.classList.remove("dock-resizing");  // takes over ends here too
   };
   document.body.classList.add("dock-resizing");
   window.addEventListener("pointermove", drag);
   window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
 }
 
 /** The splitter between two stacked panels: drags the upper / left one's size. */

@@ -92,6 +92,8 @@ interface Store {
   /** The design was restored from the autosave at start (the app offers to discard it). */
   restored: boolean;
   discardRestored: (keep: boolean) => void;
+  /** Loads the block catalog again (after sign-in). */
+  refreshCatalog: () => void;
 }
 
 const Ctx = createContext<Store | null>(null);
@@ -328,7 +330,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const booted = useRef(false);
   const loadSample = useCallback(() => api.sample("mnist_cnn.json")
     .then((p) => { if (!edited.current) load(p); }).catch(() => undefined), [load]);
-  useEffect(() => {
+  const refreshCatalog = useCallback(() => api.blocks()
+    .then((r) => setBlocks(r.blocks))
+    .catch(() => undefined), []);   // called again after sign-in: the boot fetch ran
+  useEffect(() => {                 // before the session existed and got 401s
     if (booted.current) return;
     booted.current = true;
     let attempt = 0;
@@ -427,7 +432,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     copySelection, pasteText, duplicateSelection, selectedIds, selectIds, groupSelection, ungroup,
     renameGroup, collapseGroup, addNoteAt, updateNote, removeNote,
     setSelected, selectNode, toasts, notify, dismissToast, theme, toggleTheme, version, canvas,
-    restored, discardRestored,
+    restored, discardRestored, refreshCatalog,
   };
   return <Ctx.Provider value={store}>{children}</Ctx.Provider>;
 }

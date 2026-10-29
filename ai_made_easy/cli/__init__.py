@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError as exc:
             print(f"error: {exc} — pip install 'ai-made-easy[web]'", file=sys.stderr)
             return 1
-        serve_web(args.host, args.port, args.open, auth=args.auth)
+        serve_web(args.host, args.port, args.open, auth=args.auth or None)
         return 0
 
     if args.command == "budget" and (args.list or not args.project):

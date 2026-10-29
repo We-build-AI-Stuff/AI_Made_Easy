@@ -120,12 +120,18 @@ def _data_url(path: str) -> str:
     return "data:image/png;base64," + base64.b64encode(Path(path).read_bytes()).decode()
 
 
+def auth_enabled(flag: bool | None = None) -> bool:
+    """Whether the web server asks for accounts: the flag, or ``AIME_WEB_AUTH``."""
+    if flag is not None:
+        return flag
+    return os.environ.get("AIME_WEB_AUTH", "").lower() in ("1", "true", "yes", "on")
+
+
 def create_app(*, token: str | None = None, projects_dir: str | Path | None = None,
                auth: bool | None = None, users_path: str | Path | None = None,
                secret_path: str | Path | None = None) -> FastAPI:
     token = (token if token is not None else os.environ.get("AIME_WEB_TOKEN")) or None
-    if auth is None:
-        auth = os.environ.get("AIME_WEB_AUTH", "").lower() in ("1", "true", "yes", "on")
+    auth = auth_enabled(auth)
     accounts = UserStore(users_path or aime_home() / "users.json") if auth else None
     secret = load_secret(secret_path or aime_home() / "web_secret.key") if auth else b""
     throttle = LoginThrottle() if auth else None
@@ -183,15 +189,22 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
         request.state.user = user
 
     def current_user(request: Request) -> User:
-        """The signed-in user, or an anonymous admin when auth is off."""
+        """The signed-in user, or an anonymous admin when auth is off.
+
+        The role is read from the store, not from the session token, so a
+        demotion or a promotion takes effect on the next request.
+        """
         if accounts is None:
             return User("", "admin")
         user = getattr(request.state, "user", None) or _identity(request)
         if user is None:
             raise HTTPException(401, "sign in first")
-        if user.name != "token" and accounts.get(user.name) is None:
+        if user.name == "token":
+            return user
+        fresh = accounts.get(user.name)
+        if fresh is None:
             raise HTTPException(401, "this account is no longer available")
-        return user
+        return fresh
 
     def require_admin(request: Request) -> User:
         user = current_user(request)
@@ -233,10 +246,13 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
         if accounts is None:
             me = {"name": "", "role": "admin"} if (token is None or user is not None) else None
             return {"mode": "token" if token else "none", "user": me}
+        if user is None:
+            return {"mode": "accounts", "user": None}
+        if user.name == "token":
+            return {"mode": "accounts", "user": {"name": "token", "role": "admin"}}
+        fresh = accounts.get(user.name)      # the live role, not the token's claim
         return {"mode": "accounts",
-                "user": ({"name": user.name, "role": user.role}
-                         if user and (user.name == "token"
-                                      or accounts.get(user.name)) else None)}
+                "user": {"name": fresh.name, "role": fresh.role} if fresh else None}
 
     @app.post("/api/auth/login")
     def auth_login(payload: dict = Body(...)) -> dict:  # noqa: B008
@@ -448,9 +464,10 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
         tmp.write_text(json.dumps(graph, indent=1), encoding="utf-8")
         with save_lock:     # Windows refuses to replace a file another save is replacing
             tmp.replace(file)
-        if accounts is not None and user.name not in ("", "token"):
-            _set_owner(name, user.name)
-        return {"saved": name}
+        if (accounts is not None and user.role == "member"
+                and user.name not in ("", "token") and not _owners().get(name)):
+            _set_owner(name, user.name)   # a member claims an unowned project once;
+        return {"saved": name}            # admins and the owner never take it over
 
     @app.delete("/api/projects/{name}", dependencies=guard)
     def delete_project(request: Request, name: str) -> dict:
@@ -1043,10 +1060,11 @@ class RedactToken(logging.Filter):
 
 
 def main(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False,
-         auth: bool = False) -> None:
+         auth: bool | None = None) -> None:
     import uvicorn
 
-    for name in ("uvicorn.access", "uvicorn.error"):
+    auth = auth_enabled(auth)     # `aime web` passes False when the flag is absent:
+    for name in ("uvicorn.access", "uvicorn.error"):   # the env var must still work
         logging.getLogger(name).addFilter(RedactToken())
 
     if auth:
