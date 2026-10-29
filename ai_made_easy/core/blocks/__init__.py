@@ -42,6 +42,7 @@ from ai_made_easy.core.blocks import (  # noqa: F401
     library36,
     library37,
     library38,
+    library312,
     keras_forms,
     modern,
 )

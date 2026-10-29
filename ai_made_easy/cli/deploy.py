@@ -127,6 +127,11 @@ def _deploy_command(args) -> int:  # noqa: ANN001
             result = subprocess.run([python_executable(), "-m", "uvicorn", "app:app", "--host",
                                      args.host, "--port", str(args.port)], cwd=args.package)
             return result.returncode
+        if args.command == "gguf":
+            result = api.gguf_run(args.run_id, args.out, args.quant)
+            print(result["note"])
+            print(f"gguf: {result['file']}")
+            return 0
         if args.command == "deploy":
             options = api.export_options(args.run_id)["formats"]
             if args.list_formats:

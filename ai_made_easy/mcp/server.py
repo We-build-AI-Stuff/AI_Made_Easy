@@ -403,10 +403,22 @@ def what_would_change(run_id: str, row: dict, desired: str | None = None,
 def deploy_run(run_id: str, out_dir: str, formats: list[str] | None = None) -> str:
     """Build a model-server package (FastAPI app, Dockerfile, pinned requirements) from a
     finished training run, with optional exports: onnx, onnx_int8, torchscript, coreml,
-    openvino, executorch, executorch_int8, gguf (PyTorch); onnx, saved_model, litert,
-    litert_int8 (Keras). Each export is checked against the model (see the result's formats)."""
+    openvino, executorch, executorch_int8, gguf, gguf_q8_0, gguf_q4_0 (PyTorch); onnx,
+    saved_model, litert, litert_int8 (Keras). Each export is checked against the model (see
+    the result's formats)."""
     try:
         return json.dumps(api.deploy_run(run_id, out_dir, formats), default=str)
+    except (api.ApiError, KeyError) as exc:
+        return _err(exc)
+
+
+@mcp.tool()
+def gguf_run(run_id: str, out_dir: str, quant: str = "") -> str:
+    """A finished LoRA fine-tune of a Hugging Face model (Llama, Qwen2, Phi-3 or Gemma 3) as
+    one GGUF file for llama.cpp, Ollama and LM Studio: the adapter merged into the base model,
+    float32 or quant q8_0 / q4_0, checked against transformers with llama.cpp."""
+    try:
+        return json.dumps(api.gguf_run(run_id, out_dir, quant), default=str)
     except (api.ApiError, KeyError) as exc:
         return _err(exc)
 

@@ -79,12 +79,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_dep.add_argument("-o", "--out", default=None, help="output folder (must be empty)")
     p_dep.add_argument("--formats", default="", help="comma-separated: onnx, onnx_int8, "
                        "torchscript, coreml, openvino, executorch, executorch_int8, "
-                       "gguf (PyTorch); onnx, "
+                       "gguf, gguf_q8_0, gguf_q4_0 (PyTorch); onnx, "
                        "saved_model, litert, litert_int8 (Keras); or 'suggested' for the "
                        "formats the project's budget device runs")
     p_dep.add_argument("--list-formats", action="store_true",
                        help="list the run's export formats (availability, suggestions)")
     p_dep.add_argument("--name", default=None)
+    p_gg = sub.add_parser("gguf", help="a finished LoRA fine-tune as one GGUF file (llama.cpp, "
+                          "Ollama, LM Studio)")
+    p_gg.add_argument("run_id")
+    p_gg.add_argument("-o", "--out", required=True, help="output folder")
+    p_gg.add_argument("--quant", default="", choices=("", "f32", "q8_0", "q4_0"),
+                      help="smaller weights: q8_0 (8-bit) or q4_0 (4-bit); default float32")
     p_mod = sub.add_parser("models", help="model registry")
     p_mod.add_argument("action", nargs="?", default="list",
                        choices=("list", "register", "stage", "deploy", "delete"))

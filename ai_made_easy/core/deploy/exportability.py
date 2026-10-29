@@ -64,6 +64,9 @@ _BLOCKS = {
     "seq.rwkv_block": Blocker(ON_DEVICE, "the RWKV recurrence runs as a loop with running "
                               "maxima that the ExecuTorch runtime rejects: export to ONNX or "
                               "TorchScript"),
+    # 3.12
+    "seq.rwkv7": Blocker(("executorch_int8",), "the int8 quantizer finds a cycle in the "
+                         "RWKV-7 state update: use ExecuTorch float or ONNX int8"),
     "seq.hyena": Blocker((*ON_DEVICE, "coreml", "openvino"), "the Hyena long convolution "
                          "uses FFTs (complex numbers), which ExecuTorch, Core ML and "
                          "OpenVINO's CPU runtime can't run: export to ONNX or TorchScript"),
@@ -141,13 +144,36 @@ def blockers(graph, framework: str | None = None) -> dict[str, tuple[str, str | 
             continue
         for fmt in blocker.formats:
             out.setdefault(fmt, (blocker.reason, node.instance_id))
-    if not _llama_decoder(graph):
-        out.setdefault("gguf", (GGUF_ONLY, None))
+    if not (_llama_decoder(graph) or _gpt(graph) or _rwkv7(graph)):
+        for fmt in ("gguf", "gguf_q8_0", "gguf_q4_0"):
+            out.setdefault(fmt, (GGUF_ONLY, None))
     return out
 
 
-GGUF_ONLY = ("GGUF holds Llama-style language models: Embedding → Llama Decoder Blocks → "
-             "RMSNorm → Dense without bias, as in the Tiny Llama recipe")
+GGUF_ONLY = ("GGUF holds three kinds of language model: Llama-style (Embedding → Llama "
+             "Decoder Blocks → RMSNorm → Dense without bias, as in the Tiny Llama recipe), "
+             "GPTs (one GPT block, as in Tiny GPT) and RWKV-7 (Embedding → RWKV-7 Stack → "
+             "LayerNorm → Dense without bias, as in Tiny RWKV)")
+
+
+def _rwkv7(graph) -> bool:  # noqa: ANN001 — Graph
+    """Embedding → RWKV-7 Stack → LayerNorm → Dense without bias: llama.cpp's ``rwkv7``."""
+    layers = [n for n in graph.nodes.values()
+              if n.type_id not in ("core.input", "core.output", "gen.bpe_tokenizer")
+              and n.type_id.split(".")[0] in ("core", "gen", "seq", "vision")]
+    kinds = [n.type_id for n in layers]
+    return (sorted(kinds) == sorted(["core.embedding", "seq.rwkv7", "core.layer_norm",
+                                     "core.dense"])
+            and not next(n for n in layers if n.type_id == "core.dense")
+            .resolved_params().get("bias", True))
+
+
+def _gpt(graph) -> bool:  # noqa: ANN001 — Graph
+    """One GPT block between input and output: llama.cpp's ``gpt2`` architecture."""
+    layers = [n for n in graph.nodes.values()
+              if n.type_id not in ("core.input", "core.output", "gen.bpe_tokenizer")
+              and n.type_id.split(".")[0] in ("core", "gen", "seq", "vision")]
+    return [n.type_id for n in layers] == ["gen.gpt"]
 
 
 def _llama_decoder(graph) -> bool:  # noqa: ANN001 — Graph

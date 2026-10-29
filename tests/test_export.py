@@ -94,7 +94,7 @@ def test_export_kinds_and_blockers():
     assert export_kind(_sample("shapes_detection")) == "detector"
     assert export_kind(_sample("graph_node_classification")) == "graph"
     assert export_kind(_sample("mnist_cnn")) == "tensor"
-    assert set(blockers(_sample("mnist_cnn"))) == {"gguf"}      # GGUF: Llama-style only
+    assert set(blockers(_sample("mnist_cnn"))) == {"gguf", "gguf_q8_0", "gguf_q4_0"}   # LMs only
     assert "Llama-style" in blockers(_sample("mnist_cnn"))["gguf"][0]
     assert "gguf" not in blockers(_sample("tiny_llama"))
     det = blockers(_sample("shapes_detection"))
