@@ -263,6 +263,40 @@ def test_a_file_llama_cpp_cant_read_is_an_error_not_a_crash(tmp_path):
         hf_gguf.check(tmp_path / "model", tmp_path / "broken.gguf")
 
 
+def test_a_failed_check_leaves_no_file_and_a_slow_one_is_an_error(tmp_path, monkeypatch):
+    import subprocess
+
+    from ai_made_easy.core.deploy import hf_gguf
+
+    def slow(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise subprocess.TimeoutExpired("check", hf_gguf.CHECK_SECONDS)
+
+    monkeypatch.setattr(subprocess, "run", slow)
+    with pytest.raises(hf_gguf.HfGgufError, match="took over 30 minutes"):
+        hf_gguf.check(tmp_path, tmp_path / "model.gguf")
+
+    def written(model_dir, path, quant=""):  # noqa: ANN001, ANN202
+        path.write_bytes(b"GGUF")
+        return {"family": "llama", "tokenizer": "BPE", "size": 1.0}
+
+    monkeypatch.setattr(hf_gguf, "write_gguf", written)
+    with pytest.raises(hf_gguf.HfGgufError):
+        hf_gguf.export(tmp_path, tmp_path / "model.gguf")
+    assert not (tmp_path / "model.gguf").exists()
+
+
+def test_a_run_export_names_missing_packages_before_it_starts(tmp_path, monkeypatch):
+    import importlib.util
+
+    from ai_made_easy.core.deploy import hf_gguf
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a: None if name == "peft" else real(name, *a))
+    with pytest.raises(hf_gguf.HfGgufError, match=r"needs peft: pip install"):
+        hf_gguf.export_run(tmp_path, tmp_path / "out")
+
+
 @pytest.mark.parametrize("quant", ["Q8_0", "Q4_0"])
 def test_a_quantized_hugging_face_gguf_keeps_its_next_tokens(tmp_path, quant):
     for module in ("torch", "transformers", "gguf", "llama_cpp", "tokenizers"):
