@@ -1,6 +1,6 @@
 # AI Made Easy 3.11 — plan and status
 
-*Status: implemented in PRs #80–#84; the 3.11.0 tag and release wait for your confirmation.*
+*Status: released as 3.11.0 (PRs #80–#84).*
 
 ## Phase 0 — several GPUs everywhere, Keras compiles, OpenVINO on ARM (#80)
 - **Several GPUs on Windows.** Windows can't fork. There the other processes are spawned
@@ -81,8 +81,8 @@
 - Tested with fastapi 0.162; no changes were needed. **Done.**
 
 ## Phase 4 — release 3.11.0 (#84)
-- CHANGELOG, README, this roadmap, two screenshots, version 3.11.0. The tag and release
-  follow your confirmation.
+- CHANGELOG, README, this roadmap, two screenshots, version 3.11.0. Tagged and released
+  as v3.11.0. **Done.**
 
 ## Fixed along the way
 - **Resumed SSH and Colab runs could replay their last attempt.** A resumed run reuses

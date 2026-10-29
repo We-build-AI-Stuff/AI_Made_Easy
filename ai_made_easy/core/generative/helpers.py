@@ -313,7 +313,8 @@ class Seq2SeqTransformer(nn.Module):
         tgt = tgt.long()[:, :self.max_target]
         n = tgt.shape[1]
         pos = torch.arange(n, device=tgt.device)
-        causal = torch.triu(torch.full((n, n), float("-inf"), device=tgt.device), 1)
+        # bool, like the padding masks (True: not attended to)
+        causal = torch.triu(torch.ones(n, n, dtype=torch.bool, device=tgt.device), 1)
         out = self.decoder(self.embed(tgt) + self.tgt_pos(pos), memory, tgt_mask=causal,
                            tgt_key_padding_mask=tgt == self.pad,
                            memory_key_padding_mask=src_mask)
