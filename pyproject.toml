@@ -70,9 +70,10 @@ export = ["onnx>=1.16", "onnxruntime>=1.18", "onnxscript>=0.1", "skl2onnx>=1.17"
 edge = ["executorch>=1.0", "ai-edge-litert>=1.2"]
 coreml = ["coremltools>=8.0"]          # Core ML exports; checked against PyTorch on macOS
 openvino = ["openvino>=2025.0"]        # OpenVINO exports (Intel CPUs, GPUs and NPUs)
-# GGUF exports of Llama-style decoders (llama.cpp, Ollama, LM Studio); install
-# llama-cpp-python too to check them against PyTorch
-gguf = ["gguf>=0.10"]
+# GGUF exports for llama.cpp, Ollama and LM Studio: language models trained here, and
+# LoRA fine-tunes of Hugging Face models (with the llm extra); install llama-cpp-python
+# too to check them
+gguf = ["gguf>=0.17.1", "sentencepiece>=0.2", "safetensors>=0.4"]
 tuning = ["optuna>=3.6"]
 # UMAP embeddings in classic pipelines
 umap = ["umap-learn>=0.5", "scikit-learn>=1.4"]

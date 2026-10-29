@@ -377,7 +377,8 @@ def test_tiny_rwkv_recipe_trains_a_language_model(tmp_path, monkeypatch, capsys)
     from ai_made_easy.core.recipes import build
 
     graph = build("tiny_rwkv", task="language_modeling")
-    assert sum(n.type_id == "seq.rwkv_block" for n in graph.nodes.values()) == 2
+    assert [n.type_id for n in graph.nodes.values()
+            if n.type_id.startswith("seq.")] == ["seq.rwkv7"]   # RWKV-7 since 3.12
     assert not [i for i in graph.validate() if i.severity == "error"]
     data = graph.to_dict()
     for n in data["nodes"]:

@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         return _lr_find_command(args)
     if args.command == "backends":
         return _backends_command(args)
-    if args.command in ("deploy", "models", "serve"):
+    if args.command in ("deploy", "models", "serve", "gguf"):
         return _deploy_command(args)
     if args.command == "import":
         return _import_command(args)

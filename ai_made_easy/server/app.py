@@ -656,6 +656,21 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
     def deploy_run(run_id: str, formats: str = "") -> FileResponse:
         return _package_response(lambda out: api.deploy_run(run_id, out, _split(formats)))
 
+    @app.get("/api/runs/{run_id}/gguf", dependencies=guard)
+    async def gguf_run(run_id: str, quant: str = "") -> FileResponse:
+        """A finished LoRA fine-tune as one GGUF file (merged into its base model)."""
+        work = Path(tempfile.mkdtemp(prefix="aime_gguf_"))
+        try:
+            result = await asyncio.to_thread(api.gguf_run, run_id, str(work), quant)
+        except Exception:
+            shutil.rmtree(work, ignore_errors=True)
+            raise
+        path = Path(result["file"])
+        return FileResponse(path, filename=path.name, media_type="application/octet-stream",
+                            headers={"X-AIME-Note": result["note"].encode("ascii", "replace")
+                                     .decode()},
+                            background=BackgroundTask(shutil.rmtree, work, True))
+
     @app.get("/api/models", dependencies=guard)
     def models() -> dict:
         return api.list_models()

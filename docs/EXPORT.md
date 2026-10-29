@@ -5,7 +5,7 @@ against the trained model** before it lands in the serving package:
 
 | Framework | Formats |
 | --- | --- |
-| PyTorch | ONNX, ONNX int8, TorchScript, Core ML, OpenVINO, ExecuTorch (`.pte`), ExecuTorch int8, GGUF (Llama-style language models) |
+| PyTorch | ONNX, ONNX int8, TorchScript, Core ML, OpenVINO, ExecuTorch (`.pte`), ExecuTorch int8, GGUF, GGUF Q8_0, GGUF Q4_0 (language models: Llama-style, GPT, RWKV-7) |
 | Keras | ONNX, TensorFlow SavedModel, LiteRT (`.tflite`), LiteRT int8 |
 | scikit-learn | ONNX |
 
@@ -83,15 +83,30 @@ pip install tensorflow                  # Keras -> LiteRT
 
 ```bash
 pip install 'ai-made-easy[gguf]'      # plus llama-cpp-python to check the file
-aime deploy RUN_ID -o pkg --formats gguf
+aime deploy RUN_ID -o pkg --formats gguf,gguf_q8_0
+aime gguf FINE_TUNE_RUN_ID -o out --quant q8_0   # a LoRA fine-tune of a Hugging Face model
 ```
 
-A language model built like the **Tiny Llama** recipe exports to one `model.gguf`
-(float32) that llama.cpp, Ollama and LM Studio run. That means Embedding → Llama
-Decoder Blocks → RMSNorm → Dense without bias. Its layers are llama.cpp's `llama`
-architecture one to one:
-- The rotary positions already rotate neighbouring feature pairs, as llama.cpp does.
-- The fused key/value and gate/up weights are split into llama.cpp's tensors.
+Three kinds of language model built here export to one GGUF file that llama.cpp, Ollama
+and LM Studio run. Their layers are a llama.cpp architecture one to one:
+
+| Design (recipe) | llama.cpp architecture | Checked within |
+| --- | --- | --- |
+| Embedding → Llama Decoder Blocks → RMSNorm → Dense without bias (Tiny Llama) | `llama` | 1e-4 |
+| One GPT block (Tiny GPT) | `gpt2` | 5e-3 |
+| Embedding → RWKV-7 Stack → LayerNorm → Dense without bias (Tiny RWKV) | `rwkv7` | 1e-4 |
+
+- **Llama-style:** the rotary positions already rotate neighbouring feature pairs, as
+  llama.cpp does; the fused key/value and gate/up weights are split into its tensors.
+- **GPT:** llama.cpp computes GELU through a float16 table, which moves a trained Tiny
+  GPT's outputs by about 6e-4 of their scale: its check allows 5e-3.
+- **RWKV-7:** the RWKV-7 Stack block follows llama.cpp's graph step for step (about
+  1e-5 apart). The older RWKV Block (RWKV-4) has no llama.cpp architecture.
+
+**Smaller files.** `gguf_q8_0` and `gguf_q4_0` store the weight matrices in llama.cpp's
+8-bit and 4-bit block formats (a little over a quarter and about an eighth of the
+float size). Their report says how often the top next token still agrees with the
+float model.
 
 The tokenizer goes in the file too:
 - **Bytes:** one token per byte.
@@ -102,15 +117,31 @@ spaces), llama.cpp splits text into exactly the run's tokens. Its word split fol
 GPT-2's and can differ on rare characters (combining accents).
 
 When llama-cpp-python is installed, the file is loaded on the CPU with a float32 cache
-and checked token by token against PyTorch. The tests ask for a gap under 1e-4; they
-see about 1e-6. llama.cpp's default float16 cache alone moves the logits by about 5e-4.
+and checked token by token against PyTorch. llama.cpp's default float16 cache alone
+moves the logits by about 5e-4. Any other design lists GGUF as unavailable, with the
+reason.
 
-Any other design lists GGUF as unavailable, with the reason. To make the file smaller,
-quantize it with llama.cpp:
+### Fine-tuned Hugging Face models
 
-```bash
-llama-quantize model.gguf model-q8_0.gguf Q8_0
-```
+A LoRA fine-tune (the LLM workflow) exports from its run: **Deploy** in either app, `aime
+gguf`, `GET /api/runs/{id}/gguf?quant=q8_0` or the MCP tool `gguf_run`. The adapter is
+merged into its base model (downloaded from the Hugging Face Hub if it isn't cached),
+then written as llama.cpp's converter writes that family:
+
+| Family | llama.cpp architecture | What the export does |
+| --- | --- | --- |
+| Llama (2, 3) | `llama` | reorders query and key rows for llama.cpp's rotary layout; Llama 3's frequency scaling as `rope_freqs` |
+| Qwen2 | `qwen2` | keeps the attention biases |
+| Phi-3 | `phi3` | fused QKV and gate/up projections; LongRoPE's factors |
+| Gemma 3 | `gemma3` | norm weights stored with their +1; sliding-window and global rope bases |
+
+The tokenizer goes in as SentencePiece (from `tokenizer.model`, or from a
+`tokenizer.json` that transformers saved) or as byte-level BPE, whose pre-tokenizer is
+recognised from its regex (Llama 3's, Qwen2's or GPT-2's). The file is then checked in
+a separate process: llama.cpp must split sample texts into exactly the tokenizer's tokens,
+and its next-token scores must be within 1e-3 of transformers' (quantized: the share of
+top tokens that agree). Other architectures, and rope scalings llama.cpp doesn't read,
+say why they can't export.
 
 ## Detectors and graph networks
 
@@ -168,7 +199,8 @@ rules:
 | FT-Transformer | ExecuTorch int8 | categorical ids read from the float row |
 | Mask2Former | ExecuTorch int8 | integer index tensors |
 | Stable Diffusion LoRA | all | adapters are served with diffusers |
-| Anything but a Llama-style decoder | GGUF | llama.cpp's `llama` architecture: Embedding → Llama Decoder Blocks → RMSNorm → Dense without bias |
+| Anything but a Llama-style decoder, a GPT or an RWKV-7 stack | GGUF | the designs llama.cpp's `llama`, `gpt2` and `rwkv7` architectures read (see GGUF above) |
+| RWKV-7 Stack | ExecuTorch int8 | the int8 quantizer finds a cycle in its state update |
 
 Known sensitivity: RT-DETR picks its queries from the top encoder scores. On untrained
 or barely trained models, near-ties can pick different queries in ONNX Runtime than in

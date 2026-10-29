@@ -53,7 +53,7 @@ deploy it: unavailable formats are greyed out with the reason.
 | Image generation (GAN) | DCGAN | PyTorch | generation | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
 | Image generation (diffusion) | Diffusion (DDPM) | PyTorch | generation | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
 | Text-to-image fine-tuning (LoRA) | Stable Diffusion LoRA | PyTorch | text_to_image | — |
-| Language modeling | Tiny GPT | PyTorch | prompt | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
+| Language modeling | Tiny GPT | PyTorch | prompt | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK), GGUF (llama.cpp, Ollama, LM Studio), GGUF Q8_0 (8-bit weights, about a quarter of the size), GGUF Q4_0 (4-bit weights, about an eighth of the size) |
 | Sequence to sequence | Encoder-decoder transformer | PyTorch | prompt | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin) |
 | Density estimation (normalizing flow) | RealNVP flow | PyTorch | density | ONNX, ONNX (int8 quantized), TorchScript, Core ML, OpenVINO (IR: .xml + .bin), ExecuTorch (.pte), ExecuTorch int8 (.pte, XNNPACK) |
 | Node classification | GCN | PyTorch | graph | ONNX, ONNX (int8 quantized), TorchScript |

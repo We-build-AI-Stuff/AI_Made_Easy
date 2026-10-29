@@ -229,6 +229,12 @@ def _language_model(ctx: LintContext, data) -> list:  # noqa: ANN001
                                        "the model would copy the answer instead of predicting "
                                        "it: use Causal Transformer / GPT, or a one-directional "
                                        "RNN", node.instance_id))
+        shape = ctx.shapes.get(node.instance_id)
+        if node.type_id == "core.layer_norm" and p.get("normalized_dims") == "all" \
+                and shape is not None and len(shape) >= 2:
+            out.append(_issue("error", f"{_name(node)} normalizes over every position, so each "
+                                       "one's output depends on later tokens: set "
+                                       "normalized_dims to last", node.instance_id))
     bpe = next(iter(ctx.nodes_of("gen.bpe_tokenizer")), None)
     vocab = int(bpe.resolved_params()["vocab_size"]) if bpe is not None else BYTE_VOCAB
     what = (f"the BPE tokenizer makes {vocab} tokens" if bpe is not None

@@ -215,6 +215,8 @@ export const api = {
   formats: (runId: string) => get<{ formats: ExportFormat[] }>(`/runs/${runId}/formats`),
   deployUrl: (runId: string, formats: string[]) =>
     withToken(`/api/runs/${runId}/deploy?formats=${encodeURIComponent(formats.join(","))}`),
+  ggufUrl: (runId: string, quant: string) =>
+    withToken(`/api/runs/${runId}/gguf?quant=${encodeURIComponent(quant)}`),
   models: () => get<{ models: ModelVersion[] }>("/models"),
   registerModel: (runId: string, name: string, description = "") =>
     post<ModelVersion>("/models", { run_id: runId, name, description }),

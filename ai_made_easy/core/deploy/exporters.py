@@ -42,13 +42,16 @@ HALF_TOL = 5e-2             # Core ML programs compute in float16 by default: de
 ARM_TOL = 1e-2              # OpenVINO on ARM CPUs: its kernels drift even in float32 and
                             # its accuracy mode; over Mamba-2's scan, up to 5.3e-3 of the
                             # output scale (200 random initialisations; most stay below 1e-3)
+GELU_TOL = 5e-3             # GGUF GPTs: llama.cpp's CPU GELU reads its input as float16
+                            # (a trained Tiny GPT: 5.7e-4 of the output scale)
 CLASS_TOL = 2e-3            # per-pixel outputs: or every class agrees and drift stays below
 DETECTION_MATCH = 0.9       # float detector exports: share of detections that must match
 INT8_FORMATS = ("onnx_int8", "executorch_int8", "litert_int8")
+GGUF_QUANT = {"gguf_q8_0": "Q8_0", "gguf_q4_0": "Q4_0"}   # llama.cpp's block quantizations
 ALIASES = {"tflite": "litert"}
 FORMATS = {
     "pytorch": ("onnx", "onnx_int8", "torchscript", "coreml", "openvino", "executorch",
-                "executorch_int8", "gguf"),
+                "executorch_int8", "gguf", "gguf_q8_0", "gguf_q4_0"),
     "keras": ("onnx", "saved_model", "litert", "litert_int8"),
     "sklearn": ("onnx",),
 }
@@ -60,10 +63,12 @@ LABELS = {
     "saved_model": "TensorFlow SavedModel", "litert": "LiteRT (.tflite)",
     "litert_int8": "LiteRT int8 (.tflite)",
     "gguf": "GGUF (llama.cpp, Ollama, LM Studio)",
+    "gguf_q8_0": "GGUF Q8_0 (8-bit weights, about a quarter of the size)",
+    "gguf_q4_0": "GGUF Q4_0 (4-bit weights, about an eighth of the size)",
 }
 SHORT = {"onnx": "ONNX", "onnx_int8": "ONNX int8", "torchscript": "TorchScript",
          "coreml": "Core ML", "openvino": "OpenVINO", "executorch": "ExecuTorch", "executorch_int8": "ExecuTorch int8",
-         "gguf": "GGUF",
+         "gguf": "GGUF", "gguf_q8_0": "GGUF Q8_0", "gguf_q4_0": "GGUF Q4_0",
          "saved_model": "SavedModel", "litert": "LiteRT", "litert_int8": "LiteRT int8"}
 _SOURCE = {"pytorch": "PyTorch", "keras": "Keras", "sklearn": "scikit-learn"}
 _MAX_CASES = 16          # inputs every export is checked on
@@ -207,6 +212,8 @@ def _classes(out: np.ndarray, kind: str) -> np.ndarray | None:
     [1, K, H, W] per-pixel scores)."""
     if kind == "detector":
         return None
+    if kind == "tokens":   # a language model's next-token scores [.., L, V]
+        return out.argmax(-1)
     if out.ndim == 2 and out.shape[-1] > 1:
         return out.argmax(-1)
     if out.ndim == 4 and out.shape[1] > 1:
@@ -481,15 +488,17 @@ class Exporter:
             return Check({"stochastic": 1}, True,
                          "the model samples at inference (dropout or Bayesian layers stay "
                          "on), so outputs were checked for shape, not value")
-        int8 = fmt in INT8_FORMATS
+        int8 = fmt in INT8_FORMATS or fmt in GGUF_QUANT
         labels = self.samples.labels
         eval_outs = None
         if labels is not None and self.samples.eval_cases:
             eval_outs = [np.asarray(runner(c)) for c in self.samples.eval_cases]
-        return compare(self.kind, int8, self.refs(), outs, labels=labels,
+        kind = "tokens" if fmt.startswith("gguf") else self.kind
+        return compare(kind, int8, self.refs(), outs, labels=labels,
                        eval_refs=self.eval_refs() if eval_outs else None, eval_outs=eval_outs,
                        source=_SOURCE.get(self.framework, self.framework),
-                       tol=_tolerance(fmt))
+                       tol=GELU_TOL if fmt == "gguf" and gpt_layout(self.model)
+                       else _tolerance(fmt))
 
     # ------------------------------------------------------------ PyTorch
     def _torch_table(self) -> dict:
@@ -503,7 +512,8 @@ class Exporter:
                 "openvino": [lambda: self.openvino(2), lambda: self.openvino(1)],
                 "executorch": lambda: self.executorch(False),
                 "executorch_int8": lambda: self.executorch(True),
-                "gguf": self.gguf}
+                "gguf": self.gguf, "gguf_q8_0": lambda: self.gguf("Q8_0"),
+                "gguf_q4_0": lambda: self.gguf("Q4_0")}
 
     def _tensors(self, case: tuple) -> tuple:
         import torch
@@ -702,30 +712,81 @@ class Exporter:
             return method.execute(list(self._tensors(case)))[0].float().numpy()
         return path, run, note
 
-    def gguf(self) -> tuple:
-        """A Llama-style decoder as one GGUF file (float32) for llama.cpp, Ollama and LM
-        Studio, with its byte-level tokenizer; checked token by token against PyTorch
-        with llama-cpp-python when it is installed."""
+    def gguf(self, quant: str = "") -> tuple:
+        """A language model as one GGUF file (float32) for llama.cpp, Ollama and LM
+        Studio, with its tokenizer: a Llama-style decoder (llama.cpp's ``llama``) or a
+        GPT (``gpt2``). Checked token by token against PyTorch with llama-cpp-python
+        when it is installed."""
         import gguf
         import torch
 
-        layout = llama_layout(self.model)
         context = int(np.asarray(self.samples.cases[0][0]).shape[-1])
-        path = self.out / "model.gguf"
-        writer = gguf.GGUFWriter(str(path), "llama")
-        writer.add_name("AI Made Easy decoder")
-        writer.add_context_length(context)
+        path = self.out / (f"model-{quant.lower()}.gguf" if quant else "model.gguf")
+        gpt = gpt_layout(self.model)
+        rwkv = None if gpt else rwkv7_layout(self.model)
+        layout = gpt or rwkv or llama_layout(self.model)
+        arch = "gpt2" if gpt else "rwkv7" if rwkv else "llama"
+        writer = gguf.GGUFWriter(str(path), arch)
+        writer.add_name("AI Made Easy " + {"gpt2": "GPT", "rwkv7": "RWKV-7"}.get(arch, "decoder"))
+        writer.add_context_length(gpt["context"] if gpt else context)
         writer.add_embedding_length(layout["dim"])
         writer.add_block_count(len(layout["blocks"]))
         writer.add_feed_forward_length(layout["hidden"])
-        writer.add_head_count(layout["heads"])
-        writer.add_head_count_kv(layout["kv_heads"])
-        writer.add_layer_norm_rms_eps(layout["eps"])
-        writer.add_rope_freq_base(10000.0)
-        writer.add_rope_dimension_count(layout["head_dim"])
+        writer.add_head_count(0 if rwkv else layout["heads"])
         writer.add_vocab_size(layout["vocab"])
-        writer.add_file_type(gguf.LlamaFileType.ALL_F32)
-        tokens, rules = gguf_vocabulary(layout["vocab"], self.merges)
+        if gpt or rwkv:
+            writer.add_layer_norm_eps(layout["eps"])
+        if rwkv:
+            dw, da, dv, dg = layout["ranks"]
+            writer.add_wkv_head_size(layout["head_size"])
+            writer.add_decay_lora_rank(dw)
+            writer.add_iclr_lora_rank(da)
+            writer.add_value_residual_mix_lora_rank(dv)
+            writer.add_gate_lora_rank(dg)
+            writer.add_token_shift_count(2)
+        elif not gpt:
+            writer.add_head_count_kv(layout["kv_heads"])
+            writer.add_layer_norm_rms_eps(layout["eps"])
+            writer.add_rope_freq_base(10000.0)
+            writer.add_rope_dimension_count(layout["head_dim"])
+        writer.add_file_type(getattr(gguf.LlamaFileType, f"MOSTLY_{quant}") if quant
+                             else gguf.LlamaFileType.ALL_F32)
+        rules = self._gguf_tokenizer(writer, layout["vocab"])
+
+        qtype = getattr(gguf.GGMLQuantizationType, quant) if quant else None
+        float_bytes = [0]
+
+        def put(name: str, tensor) -> None:  # noqa: ANN001
+            data = tensor.detach().float().cpu().numpy().astype(np.float32)
+            float_bytes[0] += data.nbytes
+            add_gguf_tensor(writer, name, data, qtype)
+
+        with torch.no_grad():
+            if gpt:
+                _put_gpt2(put, layout)
+            elif rwkv:
+                _put_rwkv7(put, layout)
+            else:
+                _put_llama(put, layout)
+        writer.write_header_to_file()
+        writer.write_kv_data_to_file()
+        writer.write_tensors_to_file()
+        writer.close()
+        note = f"the run's {len(rules)} BPE merges" if rules else "one token per byte"
+        if quant:
+            note = f"{quant}, {size(path) / max(float_bytes[0], 1):.0%} of the float size; {note}"
+        elif gpt:
+            note += f"; checked within {GELU_TOL:g} (llama.cpp's GELU rounds to float16)"
+        runner = self._llama_cpp(path, context)
+        if runner is None:
+            note += "; not checked here (pip install llama-cpp-python to check it)"
+        return path, runner, note
+
+    def _gguf_tokenizer(self, writer, vocab: int) -> list[str]:  # noqa: ANN001
+        """The run's byte-level tokenizer, as llama.cpp's ``gpt2`` BPE; returns its merges."""
+        import gguf
+
+        tokens, rules = gguf_vocabulary(vocab, self.merges)
         writer.add_tokenizer_model("gpt2")
         writer.add_tokenizer_pre("gpt-2")
         writer.add_token_list(tokens)
@@ -737,34 +798,7 @@ class Exporter:
         writer.add_eos_token_id(0)
         writer.add_add_bos_token(False)
         writer.add_add_eos_token(False)
-
-        def put(name: str, tensor) -> None:  # noqa: ANN001
-            writer.add_tensor(name, tensor.detach().float().cpu().numpy().astype(np.float32))
-
-        kv = layout["kv_heads"] * layout["head_dim"]
-        with torch.no_grad():
-            put("token_embd.weight", layout["embed"].weight)
-            for i, block in enumerate(layout["blocks"]):
-                k, v = block.attn.kv.weight[:kv], block.attn.kv.weight[kv:]
-                gate, up = block.ffn.gate_up.weight.chunk(2, dim=0)
-                for name, tensor in (("attn_norm", block.norm1.weight),
-                                     ("attn_q", block.attn.q.weight), ("attn_k", k),
-                                     ("attn_v", v), ("attn_output", block.attn.out.weight),
-                                     ("ffn_norm", block.norm2.weight), ("ffn_gate", gate),
-                                     ("ffn_up", up), ("ffn_down", block.ffn.down.weight)):
-                    put(f"blk.{i}.{name}.weight", tensor)
-            norm = getattr(layout["norm"], "weight", None)
-            put("output_norm.weight", norm if norm is not None else torch.ones(layout["dim"]))
-            put("output.weight", layout["head"].weight)
-        writer.write_header_to_file()
-        writer.write_kv_data_to_file()
-        writer.write_tensors_to_file()
-        writer.close()
-        note = f"the run's {len(rules)} BPE merges" if rules else "one token per byte"
-        runner = self._llama_cpp(path, context)
-        if runner is None:
-            note += "; not checked here (pip install llama-cpp-python to check it)"
-        return path, runner, note
+        return rules
 
     def _llama_cpp(self, path: Path, context: int) -> Runner | None:
         try:
@@ -931,6 +965,138 @@ def llama_layout(model) -> dict:  # noqa: ANN001 — torch.nn.Module
         raise Skipped(f"{reason}; llama.cpp uses one RMSNorm epsilon: the blocks have "
                       f"{out['eps']}, the last norm {final_eps}")
     return out
+
+
+def add_gguf_tensor(writer, name: str, data: np.ndarray, qtype=None) -> None:  # noqa: ANN001
+    """One tensor into a GGUF file: weight matrices in ``qtype`` (a llama.cpp block
+    quantization) when given and their rows fit its blocks; everything else float32."""
+    import gguf
+
+    block = gguf.GGML_QUANT_SIZES[qtype][0] if qtype is not None else 0
+    if block and data.ndim == 2 and data.shape[-1] % block == 0:
+        writer.add_tensor(name, gguf.quants.quantize(data, qtype), raw_dtype=qtype)
+    else:
+        writer.add_tensor(name, np.ascontiguousarray(data, dtype=np.float32))
+
+
+def _put_llama(put, layout: dict) -> None:  # noqa: ANN001
+    """A Llama-style decoder's tensors, by llama.cpp's names."""
+    import torch
+
+    kv = layout["kv_heads"] * layout["head_dim"]
+    put("token_embd.weight", layout["embed"].weight)
+    for i, block in enumerate(layout["blocks"]):
+        k, v = block.attn.kv.weight[:kv], block.attn.kv.weight[kv:]
+        gate, up = block.ffn.gate_up.weight.chunk(2, dim=0)
+        for name, tensor in (("attn_norm", block.norm1.weight),
+                             ("attn_q", block.attn.q.weight), ("attn_k", k),
+                             ("attn_v", v), ("attn_output", block.attn.out.weight),
+                             ("ffn_norm", block.norm2.weight), ("ffn_gate", gate),
+                             ("ffn_up", up), ("ffn_down", block.ffn.down.weight)):
+            put(f"blk.{i}.{name}.weight", tensor)
+    norm = getattr(layout["norm"], "weight", None)
+    put("output_norm.weight", norm if norm is not None else torch.ones(layout["dim"]))
+    put("output.weight", layout["head"].weight)
+
+
+def gpt_layout(model) -> dict | None:  # noqa: ANN001 — torch.nn.Module
+    """A GPT's sizes (GPT-2's layout: learned positions, pre-norm blocks with one QKV
+    projection and a GELU MLP), or None when the model is not one GPT."""
+    import torch
+
+    parts = list(model.children())
+    if len(parts) != 1 or type(parts[0]).__name__ != "GPT":
+        return None
+    gpt = parts[0]
+    blocks = list(gpt.body.blocks)
+    first = blocks[0]
+    reason = "GGUF's gpt2 layout needs every block the same, with a GELU MLP"
+    for block in blocks:
+        layers = list(block.mlp)
+        if not (isinstance(layers[1], torch.nn.GELU) and block.heads == first.heads
+                and layers[0].out_features == first.mlp[0].out_features):
+            raise Skipped(reason)
+    return {"vocab": gpt.tok.num_embeddings, "dim": gpt.tok.embedding_dim,
+            "context": gpt.context, "blocks": blocks, "heads": first.heads,
+            "hidden": first.mlp[0].out_features, "eps": float(first.ln1.eps), "gpt": gpt}
+
+
+def _put_gpt2(put, layout: dict) -> None:  # noqa: ANN001
+    """A GPT's tensors, by llama.cpp's gpt2 names."""
+    gpt = layout["gpt"]
+    put("token_embd.weight", gpt.tok.weight)
+    put("position_embd.weight", gpt.pos.weight)
+    for i, block in enumerate(layout["blocks"]):
+        up, down = block.mlp[0], block.mlp[2]
+        for name, layer in (("attn_norm", block.ln1), ("attn_qkv", block.qkv),
+                            ("attn_output", block.proj), ("ffn_norm", block.ln2),
+                            ("ffn_up", up), ("ffn_down", down)):
+            put(f"blk.{i}.{name}.weight", layer.weight)
+            put(f"blk.{i}.{name}.bias", layer.bias)
+    put("output_norm.weight", gpt.body.ln.weight)
+    put("output_norm.bias", gpt.body.ln.bias)
+    put("output.weight", gpt.head.weight)
+
+
+def rwkv7_layout(model) -> dict | None:  # noqa: ANN001 — torch.nn.Module
+    """An RWKV-7 language model's sizes (Embedding → RWKV-7 Stack → LayerNorm → Dense
+    without bias), or None when the model is not built that way."""
+    import math
+
+    parts = list(model.children())
+    names = [type(p).__name__ for p in parts]
+    if names != ["Embedding", "RWKV7", "LayerNorm", "Linear"]:
+        return None
+    embed, stack, norm, head = parts
+    first = stack.layers[0]
+    out = {"vocab": embed.num_embeddings, "dim": embed.embedding_dim, "embed": embed,
+           "stack": stack, "blocks": list(stack.layers), "norm": norm, "head": head,
+           "head_size": stack.head_size, "hidden": first.ckey.out_features,
+           "ranks": (first.w1.shape[0], first.a1.shape[0], first.v1.shape[0],
+                     first.g1.shape[0]),
+           "eps": float(stack.ln0.eps)}
+    reason = "GGUF's rwkv7 layout"
+    if head.bias is not None or head.out_features != out["vocab"]:
+        raise Skipped(f"{reason} needs the last Dense to map {out['dim']} features to the "
+                      f"{out['vocab']} tokens, without bias")
+    eps = [stack.ln0.eps, norm.eps] + [e for b in stack.layers for e in (b.ln1.eps, b.ln2.eps)]
+    if not norm.elementwise_affine or any(not math.isclose(e, out["eps"], rel_tol=1e-6)
+                                          for e in eps):
+        raise Skipped(f"{reason} uses one layer-norm epsilon, with a weight and a bias")
+    return out
+
+
+def _put_rwkv7(put, layout: dict) -> None:  # noqa: ANN001
+    """An RWKV-7 language model's tensors, by llama.cpp's rwkv7 names."""
+    stack, c = layout["stack"], layout["dim"]
+    put("token_embd.weight", layout["embed"].weight)
+    put("token_embd_norm.weight", stack.ln0.weight)
+    put("token_embd_norm.bias", stack.ln0.bias)
+    for i, b in enumerate(stack.layers):
+        pre = f"blk.{i}."
+        for name, tensor in (
+                ("attn_norm.weight", b.ln1.weight), ("attn_norm.bias", b.ln1.bias),
+                ("attn_norm_2.weight", b.ln2.weight), ("attn_norm_2.bias", b.ln2.bias),
+                ("time_mix_lerp_fused.weight", b.lerp.reshape(6, 1, 1, c)),
+                ("time_mix_w0.weight", b.w0), ("time_mix_w1.weight", b.w1),
+                ("time_mix_w2.weight", b.w2), ("time_mix_a0.weight", b.a0),
+                ("time_mix_a1.weight", b.a1), ("time_mix_a2.weight", b.a2),
+                ("time_mix_v0.weight", b.v0), ("time_mix_v1.weight", b.v1),
+                ("time_mix_v2.weight", b.v2), ("time_mix_g1.weight", b.g1),
+                ("time_mix_g2.weight", b.g2), ("time_mix_k_k.weight", b.k_k),
+                ("time_mix_k_a.weight", b.k_a), ("time_mix_r_k.weight", b.r_k),
+                ("time_mix_receptance.weight", b.receptance.weight),
+                ("time_mix_key.weight", b.key.weight),
+                ("time_mix_value.weight", b.value.weight),
+                ("time_mix_output.weight", b.output.weight),
+                ("time_mix_ln.weight", b.ln_x.weight), ("time_mix_ln.bias", b.ln_x.bias),
+                ("channel_mix_lerp_k.weight", b.cmix_k.reshape(1, 1, c)),
+                ("channel_mix_key.weight", b.ckey.weight),
+                ("channel_mix_value.weight", b.cvalue.weight)):
+            put(pre + name, tensor)
+    put("output_norm.weight", layout["norm"].weight)
+    put("output_norm.bias", layout["norm"].bias)
+    put("output.weight", layout["head"].weight)
 
 
 def _byte_text() -> dict[int, str]:

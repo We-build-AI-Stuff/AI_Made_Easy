@@ -13,6 +13,7 @@ export function DeployModal({ run, onClose }: { run: RunRecord; onClose: () => v
   const [formats, setFormats] = useState<ExportFormat[]>([]);
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const [name, setName] = useState(run.name);
+  const [quant, setQuant] = useState("q8_0");
   useEffect(() => {
     api.formats(run.run_id).then((r) => {
       setFormats(r.formats);
@@ -62,6 +63,21 @@ export function DeployModal({ run, onClose }: { run: RunRecord; onClose: () => v
           <p className="dim">Every export is checked against the trained model; the package's
             <code> export_report.json</code> has the comparison.</p>
         </div>
+        {run.framework === "llm" && (
+          <div className="field" data-testid="gguf-export">
+            <label htmlFor="gguf-quant">Language model file (GGUF)</label>
+            <p className="dim">The LoRA adapter merged into its base model, for llama.cpp,
+              Ollama and LM Studio (Llama, Qwen2, Phi-3 and Gemma 3). It is checked against
+              transformers; building it can take a few minutes.</p>
+            <select id="gguf-quant" value={quant} onChange={(e) => setQuant(e.target.value)}>
+              <option value="f32">float32</option>
+              <option value="q8_0">Q8_0 (8-bit, about a quarter of the size)</option>
+              <option value="q4_0">Q4_0 (4-bit, about an eighth)</option>
+            </select>{" "}
+            <a href={api.ggufUrl(run.run_id, quant)} download data-testid="gguf-download">
+              <button>Download GGUF</button></a>
+          </div>
+        )}
       </div>
     </Modal>
   );

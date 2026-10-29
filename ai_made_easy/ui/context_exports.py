@@ -59,10 +59,44 @@ class ExportActions:
         from ai_made_easy.ui.features.deploy import DeployDialog
 
         rec = self.experiment_service.history.get(run_id)
+        if rec.framework == "llm":   # a fine-tune: its model goes out as GGUF
+            self._export_gguf(run_id)
+            return
         DeployDialog(self.window, self.experiment_service.history.path(run_id), rec.framework,
                      rec.project or rec.name, default_dir=self._last_dir(),
                      python=python_executable(),
                      subtitle=f"Source: run {run_id} ({rec.name})").exec()
+
+    def _export_gguf(self, run_id: str) -> None:
+        """A LoRA fine-tune merged into its base model, as one GGUF file (in the
+        background: merging and checking take a few minutes)."""
+        from ai_made_easy.core.deploy import hf_gguf
+        from ai_made_easy.ui.features import tools
+
+        choices = ["Q8_0 (8-bit, about a quarter of the size)",
+                   "Q4_0 (4-bit, about an eighth)", "float32"]
+        picked, ok = QtWidgets.QInputDialog.getItem(
+            self.window, "Export GGUF", "The LoRA adapter merged into its base model, for "
+            "llama.cpp, Ollama and LM Studio.\nWeights:", choices, 0, False)
+        if not ok:
+            return
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self.window, "Save the GGUF file in",
+                                                            self._last_dir())
+        if not folder:
+            return
+        quant = {0: "q8_0", 1: "q4_0"}.get(choices.index(picked), "")
+        run_dir = self.experiment_service.history.path(run_id)
+        worker = tools.Background(self.window)
+
+        def finished(result, error: str) -> None:  # noqa: ANN001
+            if result is None:
+                QtWidgets.QMessageBox.warning(self.window, "Export GGUF", error)
+                return
+            self.status_message.emit(f"Saved {result['file']} — {result['note']}")
+
+        worker.done.connect(finished)
+        self.status_message.emit(f"Exporting run {run_id} to GGUF…")
+        worker.start(lambda: hf_gguf.export_run(run_dir, Path(folder), quant))
 
     def _try_run(self, run_id: str) -> None:
         from ai_made_easy.ui.features.try_dialog import TryDialog

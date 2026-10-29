@@ -114,6 +114,18 @@ def deploy_run(run_id: str, out_dir: str, formats: list[str] | None = None,
     return _package(manager().history.path(run_id), out_dir, formats, name)
 
 
+def gguf_run(run_id: str, out_dir: str, quant: str = "") -> dict:
+    """A finished LoRA fine-tune as one GGUF file (llama.cpp, Ollama, LM Studio): the
+    adapter merged into its Hugging Face base model (Llama, Qwen2, Phi-3 or Gemma 3),
+    float32 or ``quant`` q8_0 / q4_0, checked against transformers with llama.cpp."""
+    from ai_made_easy.core.deploy import hf_gguf
+
+    try:
+        return hf_gguf.export_run(manager().history.path(run_id), Path(out_dir), quant)
+    except (hf_gguf.HfGgufError, OSError) as exc:
+        raise ApiError(str(exc)) from exc
+
+
 def register_model(run_id: str, name: str, description: str = "",
                    also: list[str] | None = None) -> dict:
     """Register a finished run; ``also`` mirrors the version to ``mlflow`` / ``wandb``."""

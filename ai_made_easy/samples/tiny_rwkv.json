@@ -31,29 +31,25 @@
       ]
     },
     {
-      "id": "block1",
-      "type": "seq.rwkv_block",
-      "params": {},
+      "id": "rwkv",
+      "type": "seq.rwkv7",
+      "params": {
+        "layers": 2,
+        "head_size": 32
+      },
       "position": [
         400,
         0
       ]
     },
     {
-      "id": "block2",
-      "type": "seq.rwkv_block",
-      "params": {},
-      "position": [
-        600,
-        0
-      ]
-    },
-    {
       "id": "norm",
       "type": "core.layer_norm",
-      "params": {},
+      "params": {
+        "normalized_dims": "last"
+      },
       "position": [
-        800,
+        600,
         0
       ]
     },
@@ -65,7 +61,7 @@
         "bias": false
       },
       "position": [
-        1000,
+        800,
         0
       ]
     },
@@ -74,7 +70,7 @@
       "type": "core.output",
       "params": {},
       "position": [
-        1200,
+        1000,
         0
       ]
     },
@@ -132,14 +128,10 @@
     },
     {
       "from": "embed/out",
-      "to": "block1/in"
+      "to": "rwkv/in"
     },
     {
-      "from": "block1/out",
-      "to": "block2/in"
-    },
-    {
-      "from": "block2/out",
+      "from": "rwkv/out",
       "to": "norm/in"
     },
     {
