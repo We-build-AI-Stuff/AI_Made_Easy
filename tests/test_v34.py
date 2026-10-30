@@ -548,11 +548,16 @@ def test_desktop_a_moved_folded_card_reopens_where_it_was_moved(desk):
     group.set_pos(group.x_pos() + 400, group.y_pos() + 250)
     graph = canvas.to_ir()
     for nid, (x, y) in before.items():                  # saved where they will open
-        assert graph.nodes[nid].position == pytest.approx((x + 400, y + 250))
+        expected_pos = (x + 400, y + 250)
+        assert graph.nodes[nid].position[0] == pytest.approx(expected_pos[0])
+        assert graph.nodes[nid].position[1] == pytest.approx(expected_pos[1])
     canvas.load_ir(graph)
     app.processEvents()
     card = canvas._annotations("group")[0]
     assert card.folded
     assert canvas.set_group_collapsed(card, False)
     reopened = sorted(tuple(n.pos()) for n in canvas.group_members(card))
-    assert reopened == pytest.approx(sorted((x + 400, y + 250) for x, y in before.values()))
+    expected = sorted((x + 400, y + 250) for x, y in before.values())
+    for act, exp in zip(reopened, expected):
+        assert act[0] == pytest.approx(exp[0])
+        assert act[1] == pytest.approx(exp[1])
