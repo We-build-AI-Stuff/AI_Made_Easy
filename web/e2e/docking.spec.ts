@@ -78,6 +78,22 @@ test("the layout survives a reload, and reset puts everything back", async ({ pa
   expect(await side(page, "console")).toBe("bottom");
 });
 
+test("dropping a panel back where it sat keeps the order", async ({ page }) => {
+  // two panels on the left, then drag the upper one into the gap below itself
+  const ws = await page.locator(".dock-workspace").boundingBox();
+  await drag(page, page.locator('[data-dock-panel="inspector"] .dock-head'),
+             { x: ws!.x + ws!.width * 0.08, y: ws!.y + ws!.height * 0.5 });
+  const order = () => page.locator(".dock-left [data-dock-panel]").evaluateAll(
+    (els) => els.map((e) => e.getAttribute("data-dock-panel")));
+  expect(await order()).toEqual(["library", "inspector"]);
+
+  const lib = await page.locator('[data-dock-panel="library"]').boundingBox();
+  const insp = await page.locator('[data-dock-panel="inspector"]').boundingBox();
+  await drag(page, page.locator('[data-dock-panel="library"] .dock-head'),
+             { x: lib!.x + 100, y: (lib!.y + lib!.height + insp!.y) / 2 });
+  expect(await order()).toEqual(["library", "inspector"]);   // not [inspector, library]
+});
+
 test("the console's tabs still work wherever it is docked", async ({ page }) => {
   await page.getByRole("button", { name: "Training", exact: true }).click();
   await expect(page.getByTestId("canvas")).toBeVisible();
