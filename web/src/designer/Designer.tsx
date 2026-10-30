@@ -13,6 +13,7 @@ import { useStore } from "../state";
 import { GroupNode, NoteNode } from "./Annotations";
 import { BlockNode } from "./BlockNode";
 import { Problems, Training, Why } from "./BottomPanels";
+import { DockHost } from "./dock";
 import { Inspector } from "./Inspector";
 import { DRAG_TYPE, Library } from "./Library";
 
@@ -341,25 +342,29 @@ export function Designer({ onDataFile }: { onDataFile?: (file: File) => void } =
   const flowRef = useRef<{ add: (t: string) => void }>({ add: () => undefined });
   return (
     <ReactFlowProvider>
-      <div className="workspace">
-        <Library onAdd={(t) => flowRef.current.add(t)} />
-        <div className="center-col">
-          <AddHelper refObj={flowRef} addBlock={addBlock} setSelected={setSelected} />
-          <Canvas onDataFile={onDataFile} />
-          <section className="panel bottom-panel">
-            <div className="tabs">
-              {["problems", "training", "why"].map((t) => (
-                <button key={t} className={bottom === t ? "active" : ""} onClick={() => setBottom(t)}>
-                  {t[0].toUpperCase() + t.slice(1)}
-                </button>
-              ))}
-            </div>
-            <div className="tab-body">{bottom === "problems" ? <Problems />
-              : bottom === "why" ? <Why /> : isPipeline ? <PipelinePanel /> : <Training />}</div>
-          </section>
-        </div>
-        <Inspector />
-      </div>
+      <DockHost
+        canvas={<Canvas onDataFile={onDataFile} />}
+        classNames={{ library: "library", inspector: "inspector", console: "bottom-panel" }}
+        panels={{
+          library: <Library onAdd={(t) => flowRef.current.add(t)} />,
+          inspector: <Inspector />,
+          console: (
+            <>
+              <div className="tabs">
+                {["problems", "training", "why"].map((t) => (
+                  <button key={t} className={bottom === t ? "active" : ""}
+                          onClick={() => setBottom(t)}>
+                    {t[0].toUpperCase() + t.slice(1)}
+                  </button>
+                ))}
+              </div>
+              <div className="tab-body">{bottom === "problems" ? <Problems />
+                : bottom === "why" ? <Why /> : isPipeline ? <PipelinePanel /> : <Training />}
+              </div>
+            </>
+          ),
+        }} />
+      <AddHelper refObj={flowRef} addBlock={addBlock} setSelected={setSelected} />
     </ReactFlowProvider>
   );
 }

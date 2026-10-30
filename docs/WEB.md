@@ -31,6 +31,13 @@ Getting around (3.3):
   canvas (also Ctrl/⌘ F) and Enter selects and centres one.
 - **Shortcuts** (`?`): copy / paste / duplicate (Ctrl/⌘ C, V, D), group (Ctrl/⌘ G),
   select all (Ctrl/⌘ A), zoom (Ctrl/⌘ =, −, 0), undo / redo, pages (Alt+1…4).
+- **Dockable panels** (3.12): drag the Block Library, the Inspector or the
+  bottom console by its header to any screen edge or corner — edges glow while
+  you drag. Every panel resizes from its splitters, collapses to a slim rail
+  (click the rail to restore) and returns to the default arrangement with
+  **Layout ▸ Reset layout**. The arrangement is remembered per browser. On
+  narrow screens the panels become drawers over the canvas instead of squeezing
+  it.
 - Sticky notes and named groups on the canvas; drop a CSV or a zip of class folders on
   the canvas to start a project from it.
 - A three-step tour on first start (the palette's "Show the tour again" brings it back).

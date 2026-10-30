@@ -7,11 +7,13 @@ import { CommandPalette, type PaletteMode, ShortcutsSheet } from "./components/C
 import { FileMenu } from "./components/FileMenu";
 import { ImportDialog } from "./components/ImportDialog";
 import { OpenDialog } from "./components/OpenDialog";
+import { LayoutMenu } from "./components/LayoutMenu";
 import { Toasts } from "./components/Toasts";
 import { ToolsModal } from "./components/Tools";
 import { resetTour, Tour, tourDone } from "./components/Tour";
 import { NewProjectWizard } from "./components/Wizard";
 import { Designer } from "./designer/Designer";
+import { DockProvider, useDockState } from "./designer/dock";
 import { downloadCanvas } from "./exportPng";
 import { DataPage } from "./pages/DataPage";
 import { ExperimentsPage } from "./pages/ExperimentsPage";
@@ -41,6 +43,7 @@ const showTourAtStart = () => !tourDone()
 
 export function App() {
   const store = useStore();
+  const dock = useDockState();
   const { name, setName, project, notify, theme, toggleTheme, version, validation, nodes,
           dataIssues, undo, redo, duplicateSelection, groupSelection, copySelection, arrange,
           canvas, load, restored, discardRestored } = store;
@@ -130,6 +133,10 @@ export function App() {
     "view.zoom_out": () => onCanvas(() => canvas.current?.zoomOut()),
     "view.zoom_fit": () => onCanvas(() => canvas.current?.fit()),
     "view.theme": toggleTheme,
+    "view.panel_library": () => dock.toggle("library"),
+    "view.panel_inspector": () => dock.toggle("inspector"),
+    "view.panel_console": () => dock.toggle("console"),
+    "view.reset_layout": () => { dock.reset(); notify("Panels back to the default layout"); },
     "go.design": () => setPage("design"),
     "go.data": () => setPage("data"),
     "go.experiments": () => setPage("experiments"),
@@ -140,7 +147,7 @@ export function App() {
     "help.shortcuts": () => setDialog("shortcuts"),
     "help.tour": () => { resetTour(); setPage("design"); setTour(true); },
   }), [save, download, onCanvas, nodes.length, notify, canvas, name, undo, redo, copySelection,
-       duplicateSelection, groupSelection, arrange, toggleTheme]);
+       duplicateSelection, groupSelection, arrange, toggleTheme, dock]);
   const run = useCallback((id: string) => handlers[id]?.(), [handlers]);
   const available: ActionDef[] = useMemo(() => ACTIONS.filter((a) => handlers[a.id]), [handlers]);
 
@@ -172,10 +179,12 @@ export function App() {
   const errors = validation?.issues.filter((i) => i.severity === "error").length ?? 0;
   const warnings = (validation?.issues.length ?? 0) - errors + dataIssues.length;
   return (
+    <DockProvider value={dock}>
     <div className="app">
       <header className="topbar">
         <div className="brand">AI <span>Made Easy</span></div>
         <FileMenu run={run} openRecent={openRecent} />
+        <LayoutMenu />
         <nav className="nav" aria-label="Pages">
           {PAGES.map(([id, label]) => (
             <button key={id} className={page === id ? "active" : ""} onClick={() => setPage(id)}
@@ -238,5 +247,6 @@ export function App() {
       {tour && page === "design" && !dialog && <Tour onClose={() => setTour(false)} />}
       <Toasts />
     </div>
+    </DockProvider>
   );
 }
