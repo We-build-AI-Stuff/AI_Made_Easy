@@ -126,7 +126,9 @@ export function useDockState(): DockApi {
     setLayout((l) => {
       const sides = { left: [...l.sides.left], right: [...l.sides.right],
                       bottom: [...l.sides.bottom] };
-      for (const s of SIDES) sides[s] = sides[s].filter((p) => p !== panel);
+      const was = sides[side].indexOf(panel);   // the index counted a list that
+      for (const s of SIDES) sides[s] = sides[s].filter((p) => p !== panel);  // still
+      if (was > -1 && was < index) index -= 1;  // held the dragged panel
       sides[side].splice(clamp(index, 0, sides[side].length), 0, panel);
       return { ...l, sides, collapsed: { ...l.collapsed, [panel]: false } };
     });
@@ -253,7 +255,7 @@ export function DockHost({ canvas, panels, classNames }: {
     if (!ids.length) return null;
     const open = ids.filter((p) => !layout.collapsed[p]);
     const rails = ids.filter((p) => layout.collapsed[p]);
-    const width = drawerOpen ? undefined : layout.sideWidth[side];
+    const width = drawerOpen || !open.length ? undefined : layout.sideWidth[side];
     return (
       <div className={`dock-side dock-${side}${drawerOpen ? " drawer-open" : ""}`}
            style={{ width }} data-dock-side={side}
@@ -279,7 +281,8 @@ export function DockHost({ canvas, panels, classNames }: {
     const strip = (
       <section className={`dock-bottom${compact && drawers.bottom ? " drawer-open" : ""}`}
                data-dock-side="bottom"
-               style={{ height: compact ? undefined : layout.bottomHeight }}>
+               style={{ height: compact || !open.length ? undefined
+                                : layout.bottomHeight }}>
         <div className="dock-bottom-row">
           {open.flatMap((p, i) => i < open.length - 1
             ? [renderPanel(p, "bottom"),
@@ -453,7 +456,8 @@ function DropOverlay({ drag, rect }: { drag: DragState; rect?: DOMRect }) {
       <div className={`drop-zone zone-right${zone?.side === "right" ? " active" : ""}`} />
       <div className={`drop-zone zone-bottom${zone?.side === "bottom" ? " active" : ""}`} />
       {line && <div className="drop-line" style={line} />}
-      <div className="drop-ghost" style={{ left: drag.x, top: drag.y }}>
+      <div className="drop-ghost" style={{ left: drag.x - rect.left,
+                                             top: drag.y - rect.top }}>
         {PANEL_TITLES[drag.panel]}
       </div>
     </div>
