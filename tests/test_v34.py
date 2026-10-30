@@ -558,6 +558,6 @@ def test_desktop_a_moved_folded_card_reopens_where_it_was_moved(desk):
     assert canvas.set_group_collapsed(card, False)
     reopened = sorted(tuple(n.pos()) for n in canvas.group_members(card))
     expected = sorted((x + 400, y + 250) for x, y in before.values())
-    for act, exp in zip(reopened, expected):
+    for act, exp in zip(reopened, expected, strict=False):
         assert act[0] == pytest.approx(exp[0])
         assert act[1] == pytest.approx(exp[1])
