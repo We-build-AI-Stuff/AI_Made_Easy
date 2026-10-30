@@ -147,8 +147,11 @@ test("in-app confirm, and toasts queue up", async ({ page }) => {
 test("restored designs can be discarded; the tour shows once", async ({ page }) => {
   await page.locator(".block-node").first().click();
   await page.keyboard.press("Delete");
-  await page.waitForTimeout(1000);   // autosave
   const kept = await page.locator(".block-node").count();
+  // wait for the autosave itself rather than a fixed sleep: the debounce is 800 ms
+  await expect.poll(() => page.evaluate(() =>
+    (JSON.parse(localStorage.getItem("aime.autosave") ?? "{}").nodes ?? []).length),
+    { timeout: 5000 }).toBe(kept);
   await page.reload();
   const banner = page.getByTestId("restored");
   await expect(banner).toBeVisible();

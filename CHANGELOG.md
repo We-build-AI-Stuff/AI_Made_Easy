@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+A dockable workspace in the browser.
+
+### Added
+- **Dockable panels in the web app**: the Block Library, the Inspector and the
+  bottom console (Problems / Training / Why) can be dragged to any screen edge
+  or corner, resized from splitters, collapsed to a slim rail and restored
+  (Layout ▸ Reset layout, or the command palette). The arrangement is remembered
+  per browser; under 880 px the panels become drawers over the canvas, so
+  nothing overlaps. A drag only counts after a little movement, and
+  `pointercancel` (a touch gesture the browser takes over) ends it cleanly.
+
 ## 3.11.0
 
 Several GPUs on every platform, bigger models (bfloat16, sharding, quantization-aware
