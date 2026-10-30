@@ -318,7 +318,7 @@ function CodeTab() {
 export function Inspector() {
   const [tab, setTab] = useState("properties");
   return (
-    <aside className="panel inspector">
+    <div className="inspector-body">
       <div className="tabs">
         {["properties", "summary", "code"].map((t) => (
           <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
@@ -331,6 +331,6 @@ export function Inspector() {
         {tab === "summary" && <SummaryTab />}
         {tab === "code" && <CodeTab />}
       </div>
-    </aside>
+    </div>
   );
 }

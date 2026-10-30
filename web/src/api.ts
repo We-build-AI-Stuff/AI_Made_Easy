@@ -69,6 +69,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
   });
   if (!res.ok) {
+    if (res.status === 401 && !path.startsWith("/auth/login")) {
+      window.dispatchEvent(new CustomEvent("aime.unauthorized"));  // show the sign-in
+    }
     let message = `${res.status} ${res.statusText}`;
     try {
       const data = await res.json();
@@ -85,9 +88,32 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 const get = <T>(path: string) => request<T>("GET", path);
 const post = <T>(path: string, body?: unknown) => request<T>("POST", path, body ?? {});
 
+export interface AuthUser { name: string; role: string }
+
 export const api = {
   setToken: (token: string) => localStorage.setItem(TOKEN_KEY, token),
-  info: () => get<{ version: string; auth: boolean; blocks: number }>("/info"),
+  clearToken: () => localStorage.removeItem(TOKEN_KEY),
+  info: () => get<{ version: string; auth: boolean; auth_mode?: string; blocks: number }>("/info"),
+  authStatus: () => get<{ mode: string; user: AuthUser | null }>("/auth/status"),
+  /** Sign in; a wrong password comes back as a normal error (no global 401 event). */
+  login: async (name: string, password: string): Promise<{ token: string; user: AuthUser }> => {
+    const res = await fetch("/api/auth/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, password }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(typeof data.detail === "string" ? data.detail
+                                    : `${res.status} ${res.statusText}`);
+    return data as { token: string; user: AuthUser };
+  },
+  me: () => get<AuthUser>("/auth/me"),
+  users: () => get<{ users: { name: string; role: string; disabled: boolean }[] }>("/admin/users"),
+  addUser: (name: string, password: string, role: string) =>
+    post<{ created: string; role: string }>("/admin/users", { name, password, role }),
+  patchUser: (name: string, changes: Record<string, unknown>) =>
+    request<{ updated: string }>("PATCH", `/admin/users/${encodeURIComponent(name)}`, changes),
+  removeUser: (name: string) =>
+    request<{ removed: string }>("DELETE", `/admin/users/${encodeURIComponent(name)}`),
 
   blocks: () => get<{ blocks: BlockDef[] }>("/blocks"),
   samples: () => get<{ samples: string[] }>("/samples"),

@@ -240,7 +240,7 @@ Install only what you need with the optional extras:
 | `keras` | Keras 3 for running exported Keras code |
 | `llm` | Hugging Face generation, LoRA fine-tuning and RAG scripts |
 | `mcp-server` | Model Context Protocol server for AI agents |
-| `web` / `serve` | Browser UI (`aime web`) and serving packages (FastAPI, uvicorn) |
+| `web` / `serve` | Browser UI (`aime web --auth` adds user accounts: `aime users`) and serving packages (FastAPI, uvicorn) |
 | `export` | ONNX / onnxruntime / skl2onnx exports and verification |
 | `edge` | On-device exports: ExecuTorch (`.pte`) and the LiteRT interpreter |
 | `coreml` | Core ML exports (`.mlpackage`), checked against PyTorch when exported on a Mac |
@@ -340,6 +340,8 @@ aime serve serving                             # run it with uvicorn
 aime models list | register RUN NAME | stage NAME VERSION production
 aime import onnx model.onnx -o project.json    # also: pytorch (--attr, --shape), keras
 aime web                                       # browser UI + REST API
+aime web --auth                                # … with user accounts (`aime users add`)
+aime users list | add NAME --role admin        # manage the web app's accounts
 aime blocks                                    # every block as a JSON schema
 ```
 

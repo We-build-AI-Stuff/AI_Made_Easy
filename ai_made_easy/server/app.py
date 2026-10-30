@@ -5,10 +5,16 @@ uvicorn. Every endpoint lives under ``/api``; the built frontend (``static/``)
 is served at ``/``. Projects are stored as JSON under ``$AIME_HOME/projects``;
 runs, sweeps and the model registry use the same stores as the desktop app.
 
-Access control: when ``AIME_WEB_TOKEN`` (or ``create_app(token=...)``) is set,
-every request needs ``Authorization: Bearer <token>``. WebSockets and GET requests
-(download links the browser opens directly) may pass ``?token=<token>`` instead.
-Without it the server is meant for localhost only.
+Access control comes in two flavours:
+
+- a shared token: when ``AIME_WEB_TOKEN`` (or ``create_app(token=...)``) is set,
+  every request needs ``Authorization: Bearer <token>``. WebSockets and GET requests
+  (download links the browser opens directly) may pass ``?token=<token>`` instead.
+  Without it the server is meant for localhost only.
+- user accounts (``aime web --auth`` or ``AIME_WEB_AUTH=1``): users sign in with a
+  name and password (``server/users.py``); members work on their own projects,
+  admins manage users and see every project. The shared token, when set, still
+  works next to accounts as an admin key for scripts.
 """
 from __future__ import annotations
 
@@ -44,11 +50,21 @@ from starlette.background import BackgroundTask
 
 from ai_made_easy import __version__
 from ai_made_easy.core import api
-from ai_made_easy.core.paths import subdir
+from ai_made_easy.core.paths import aime_home, subdir
 from ai_made_easy.core.runner.manager import max_upload_bytes
+from ai_made_easy.server.users import (
+    LoginThrottle,
+    User,
+    UserError,
+    UserStore,
+    issue_token,
+    load_secret,
+    read_token,
+)
 
 STATIC = Path(__file__).parent / "static"
 _NAME = re.compile(r"^[\w][\w .-]{0,99}$")
+_OWNERS = ".owners.json"    # project → user, beside the projects (not inside them)
 _STALE_POLLS = 5  # ~10 s without events from a run no process is running
 _CHUNK = 1 << 20
 log = logging.getLogger(__name__)
@@ -104,8 +120,21 @@ def _data_url(path: str) -> str:
     return "data:image/png;base64," + base64.b64encode(Path(path).read_bytes()).decode()
 
 
-def create_app(*, token: str | None = None, projects_dir: str | Path | None = None) -> FastAPI:
+def auth_enabled(flag: bool | None = None) -> bool:
+    """Whether the web server asks for accounts: the flag, or ``AIME_WEB_AUTH``."""
+    if flag is not None:
+        return flag
+    return os.environ.get("AIME_WEB_AUTH", "").lower() in ("1", "true", "yes", "on")
+
+
+def create_app(*, token: str | None = None, projects_dir: str | Path | None = None,
+               auth: bool | None = None, users_path: str | Path | None = None,
+               secret_path: str | Path | None = None) -> FastAPI:
     token = (token if token is not None else os.environ.get("AIME_WEB_TOKEN")) or None
+    auth = auth_enabled(auth)
+    accounts = UserStore(users_path or aime_home() / "users.json") if auth else None
+    secret = load_secret(secret_path or aime_home() / "web_secret.key") if auth else b""
+    throttle = LoginThrottle() if auth else None
     projects = Path(projects_dir) if projects_dir else subdir("projects")
     save_lock = threading.Lock()
     projects.mkdir(parents=True, exist_ok=True)
@@ -114,14 +143,74 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
     except Exception as exc:  # noqa: BLE001 — never block the server from starting
         log.warning("could not check for interrupted runs: %s", exc)
 
+    def _owners() -> dict[str, str]:
+        try:
+            return json.loads((projects / _OWNERS).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _set_owner(name: str, owner: str | None) -> None:
+        with save_lock:
+            owners = _owners()
+            if owner is None:
+                owners.pop(name, None)
+            else:
+                owners[name] = owner
+            tmp = projects / f".owners.{uuid.uuid4().hex[:8]}.tmp"
+            tmp.write_text(json.dumps(owners), encoding="utf-8")
+            tmp.replace(projects / _OWNERS)
+
+    def _identity(request: Request, *, for_query: str = "") -> User | None:
+        """Who is asking: a session token, the shared token (admin) or no one."""
+        supplied = (request.headers.get("authorization", "") if request else ""
+                    ).removeprefix("Bearer ").strip() or for_query
+        if not supplied:
+            return None
+        if token and secrets.compare_digest(supplied, token):
+            return User("token", "admin")   # the shared key acts as an admin
+        if accounts is not None:
+            return read_token(secret, supplied)
+        return None
+
     def authorize(request: Request) -> None:
-        if token is None:
+        if accounts is None:
+            if token is None:
+                return
+            user = _identity(request, for_query=request.query_params.get("token", "")
+                             if request.method == "GET" else "")
+            if user is None:
+                raise HTTPException(401, "missing or invalid access token")
+            request.state.user = user
             return
-        supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
-        if not supplied and request.method == "GET":  # links: package and export downloads
-            supplied = request.query_params.get("token", "")
-        if not secrets.compare_digest(supplied, token):
-            raise HTTPException(401, "missing or invalid access token")
+        user = _identity(request, for_query=request.query_params.get("token", "")
+                         if request.method == "GET" else "")
+        if user is None:
+            raise HTTPException(401, "sign in first")
+        request.state.user = user
+
+    def current_user(request: Request) -> User:
+        """The signed-in user, or an anonymous admin when auth is off.
+
+        The role is read from the store, not from the session token, so a
+        demotion or a promotion takes effect on the next request.
+        """
+        if accounts is None:
+            return User("", "admin")
+        user = getattr(request.state, "user", None) or _identity(request)
+        if user is None:
+            raise HTTPException(401, "sign in first")
+        if user.name == "token":
+            return user
+        fresh = accounts.get(user.name)
+        if fresh is None:
+            raise HTTPException(401, "this account is no longer available")
+        return fresh
+
+    def require_admin(request: Request) -> User:
+        user = current_user(request)
+        if user.role != "admin":
+            raise HTTPException(403, "admins only")
+        return user
 
     app = FastAPI(title="AI Made Easy", version=__version__, docs_url="/api/docs",
                   openapi_url="/api/openapi.json", redoc_url=None)
@@ -146,7 +235,97 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
         from ai_made_easy.core.registry import get_registry
 
         return {"version": __version__, "auth": token is not None,
+                "auth_mode": "accounts" if accounts is not None else "token" if token else "none",
                 "blocks": len(get_registry().all())}
+
+    # ----------------------------------------------------------------- auth
+    @app.get("/api/auth/status")
+    def auth_status(request: Request) -> dict:
+        """Public: which flavour of access control is on, and who is asking."""
+        user = _identity(request, for_query=request.query_params.get("token", ""))
+        if accounts is None:
+            me = {"name": "", "role": "admin"} if (token is None or user is not None) else None
+            return {"mode": "token" if token else "none", "user": me}
+        if user is None:
+            return {"mode": "accounts", "user": None}
+        if user.name == "token":
+            return {"mode": "accounts", "user": {"name": "token", "role": "admin"}}
+        fresh = accounts.get(user.name)      # the live role, not the token's claim
+        return {"mode": "accounts",
+                "user": {"name": fresh.name, "role": fresh.role} if fresh else None}
+
+    @app.post("/api/auth/login")
+    def auth_login(payload: dict = Body(...)) -> dict:  # noqa: B008
+        if accounts is None:
+            raise HTTPException(400, "this server does not use user accounts")
+        name = str(payload.get("name", "")).strip()
+        password = str(payload.get("password", ""))
+        if not name or not password:
+            raise HTTPException(400, "name and password are required")
+        if (left := throttle.blocked(name)) > 0:
+            raise HTTPException(429, f"too many failed sign-ins — try again in {int(left) + 1} s")
+        user = accounts.verify(name, password)
+        if user is None:
+            throttle.record_failure(name)
+            raise HTTPException(401, "wrong name or password")
+        throttle.record_success(name)
+        return {"token": issue_token(secret, user),
+                "user": {"name": user.name, "role": user.role}}
+
+    @app.get("/api/auth/me", dependencies=guard)
+    def auth_me(request: Request) -> dict:
+        user = current_user(request)
+        return {"name": user.name, "role": user.role}
+
+    # -------------------------------------------------------- user management
+    def _user_or_400(payload: dict, key: str = "name") -> str:
+        name = str(payload.get(key, "")).strip()
+        if not name:
+            raise HTTPException(400, "name is required")
+        return name
+
+    @app.get("/api/admin/users", dependencies=guard)
+    def admin_users(request: Request) -> dict:
+        require_admin(request)
+        return {"users": accounts.list()}
+
+    @app.post("/api/admin/users", dependencies=guard)
+    def admin_add_user(request: Request, payload: dict = Body(...)) -> dict:  # noqa: B008
+        require_admin(request)
+        try:
+            user = accounts.add(_user_or_400(payload), str(payload.get("password", "")),
+                                str(payload.get("role", "member")))
+        except UserError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"created": user.name, "role": user.role}
+
+    @app.patch("/api/admin/users/{name}", dependencies=guard)
+    def admin_patch_user(request: Request, name: str,
+                         payload: dict = Body(...)) -> dict:  # noqa: B008
+        admin = require_admin(request)
+        try:
+            if payload.get("password") is not None:
+                accounts.set_password(name, str(payload["password"]))
+            if payload.get("role") is not None:
+                accounts.set_role(name, str(payload["role"]))
+            if payload.get("disabled") is not None:
+                if name == admin.name and payload["disabled"] is True:
+                    raise UserError("you cannot disable yourself")
+                accounts.set_disabled(name, bool(payload["disabled"]))
+        except UserError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"updated": name}
+
+    @app.delete("/api/admin/users/{name}", dependencies=guard)
+    def admin_delete_user(request: Request, name: str) -> dict:
+        admin = require_admin(request)
+        if name == admin.name:
+            raise HTTPException(400, "you cannot remove yourself")
+        try:
+            accounts.remove(name)
+        except UserError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"removed": name}
 
     # ------------------------------------------------------------- catalog
     @app.get("/api/blocks", dependencies=guard)
@@ -228,14 +407,26 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
         return api.expand(_graph_body(payload), str(payload.get("node_id", "")))
 
     # ------------------------------------------------------------ projects
+    def _may_write(user: User, name: str, owners: dict[str, str]) -> bool:
+        """Admins (and the shared token) may touch anything; a member only their own
+        and unowned projects — ones saved before accounts existed."""
+        return user.role == "admin" or user.name == "token" or owners.get(name, "") in (
+            "", user.name)
+
     @app.get("/api/projects", dependencies=guard)
-    def list_projects() -> dict:
+    def list_projects(request: Request) -> dict:
         from ai_made_easy.core.migrate import kind_of
 
+        user = current_user(request)
+        owners = _owners() if accounts is not None else {}
         rows = []
         for p in sorted(projects.glob("*.json"), key=lambda p: -p.stat().st_mtime):
+            if p.name.startswith("."):     # .owners.json bookkeeping, not a project
+                continue
+            if accounts is not None and not _may_write(user, p.stem, owners):
+                continue
             row = {"name": p.stem, "modified": p.stat().st_mtime, "family": None,
-                   "task": None}
+                   "task": None, "owner": owners.get(p.stem)}
             try:
                 row.update(kind_of(json.loads(p.read_text(encoding="utf-8"))))
             except Exception:  # noqa: BLE001, S110 — an unreadable file still gets listed
@@ -244,18 +435,26 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
         return {"projects": rows}
 
     @app.get("/api/projects/{name}", dependencies=guard)
-    def get_project(name: str) -> dict:
+    def get_project(request: Request, name: str) -> dict:
         from ai_made_easy.core.migrate import migrate
 
         file = _project_file(projects, name)
         if not file.exists():
             raise HTTPException(404, f"no project named {name!r}")
+        if accounts is not None and not _may_write(current_user(request), name, _owners()):
+            raise HTTPException(404, f"no project named {name!r}")  # not theirs to know of
         return migrate(json.loads(file.read_text(encoding="utf-8")))
 
     @app.put("/api/projects/{name}", dependencies=guard)
-    def put_project(name: str, graph: dict = Body(...)) -> dict:  # noqa: B008
+    def put_project(request: Request, name: str, graph: dict = Body(...)) -> dict:  # noqa: B008
         from ai_made_easy.core.migrate import stamp
 
+        user = current_user(request)
+        if accounts is not None:
+            owners = _owners()
+            if not _may_write(user, name, owners):
+                raise HTTPException(403, f"{name!r} belongs to "
+                                         f"{owners.get(name, 'another user')}")
         file = _project_file(projects, name)
         try:
             graph = stamp({**graph, "name": name})
@@ -265,14 +464,22 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
         tmp.write_text(json.dumps(graph, indent=1), encoding="utf-8")
         with save_lock:     # Windows refuses to replace a file another save is replacing
             tmp.replace(file)
-        return {"saved": name}
+        if (accounts is not None and user.role == "member"
+                and user.name not in ("", "token") and not _owners().get(name)):
+            _set_owner(name, user.name)   # a member claims an unowned project once;
+        return {"saved": name}            # admins and the owner never take it over
 
     @app.delete("/api/projects/{name}", dependencies=guard)
-    def delete_project(name: str) -> dict:
+    def delete_project(request: Request, name: str) -> dict:
+        user = current_user(request)
+        if accounts is not None and not _may_write(user, name, _owners()):
+            raise HTTPException(403, f"{name!r} belongs to another user")
         file = _project_file(projects, name)
         if not file.exists():
             raise HTTPException(404, f"no project named {name!r}")
         file.unlink()
+        if accounts is not None:
+            _set_owner(name, None)
         return {"deleted": name}
 
     # ---------------------------------------------------------------- runs
@@ -397,7 +604,13 @@ def create_app(*, token: str | None = None, projects_dir: str | Path | None = No
 
     @app.websocket("/api/runs/{run_id}/events")
     async def run_events(ws: WebSocket, run_id: str, token_q: str = Query("", alias="token")):
-        if token is not None and not secrets.compare_digest(token_q, token):
+        if accounts is not None:
+            who = (User("token", "admin") if token and secrets.compare_digest(token_q, token)
+                   else read_token(secret, token_q))
+            if who is None or (who.name != "token" and accounts.get(who.name) is None):
+                await ws.close(code=4401)
+                return
+        elif token is not None and not secrets.compare_digest(token_q, token):
             await ws.close(code=4401)
             return
         mgr = api.manager()
@@ -846,18 +1059,29 @@ class RedactToken(logging.Filter):
         return True
 
 
-def main(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False) -> None:
+def main(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False,
+         auth: bool | None = None) -> None:
     import uvicorn
 
-    for name in ("uvicorn.access", "uvicorn.error"):
+    auth = auth_enabled(auth)     # `aime web` passes False when the flag is absent:
+    for name in ("uvicorn.access", "uvicorn.error"):   # the env var must still work
         logging.getLogger(name).addFilter(RedactToken())
 
-    if host not in ("127.0.0.1", "localhost", "::1") and not os.environ.get("AIME_WEB_TOKEN"):
-        print("warning: serving on a public interface without AIME_WEB_TOKEN — anyone who can "
-              "reach this port can train models and read your files")
+    if auth:
+        store = UserStore(aime_home() / "users.json")
+        if store.count() == 0:    # first start: an admin to sign in with, printed once
+            password = secrets.token_urlsafe(12)
+            store.add("admin", password, "admin")
+            print("accounts are on: created the first admin — sign in as "
+                  f"'admin' with '{password}' (shown only here; "
+                  "`aime users passwd admin` changes it)")
+    elif host not in ("127.0.0.1", "localhost", "::1") and not os.environ.get("AIME_WEB_TOKEN"):
+        print("warning: serving on a public interface without accounts (--auth) or "
+              "AIME_WEB_TOKEN — anyone who can reach this port can train models and "
+              "read your files")
     if open_browser:
         import threading
         import webbrowser
 
         threading.Timer(1.0, lambda: webbrowser.open(f"http://{host}:{port}/")).start()
-    uvicorn.run(create_app(), host=host, port=port, log_level="info")
+    uvicorn.run(create_app(auth=auth), host=host, port=port, log_level="info")

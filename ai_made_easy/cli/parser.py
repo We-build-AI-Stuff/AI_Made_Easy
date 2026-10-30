@@ -143,6 +143,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_web.add_argument("--host", default="127.0.0.1")
     p_web.add_argument("--port", type=int, default=8765)
     p_web.add_argument("--open", action="store_true", help="open the browser")
+    p_web.add_argument("--auth", action="store_true",
+                       help="require user accounts (sign in in the browser; "
+                            "manage them with `aime users`)")
+    p_usr = sub.add_parser("users", help="manage the web app's user accounts")
+    u = p_usr.add_subparsers(dest="users_cmd", required=True)
+    u.add_parser("list", help="every account, with its role")
+    p_add = u.add_parser("add", help="create an account (asks for the password)")
+    p_add.add_argument("name")
+    p_add.add_argument("--role", choices=("admin", "member"), default="member")
+    p_pw = u.add_parser("passwd", help="change a password (asks for the new one)")
+    p_pw.add_argument("name")
+    p_role = u.add_parser("role", help="make someone an admin or a member")
+    p_role.add_argument("name")
+    p_role.add_argument("role", choices=("admin", "member"))
+    for cmd, help_text in (("enable", "let a disabled account sign in again"),
+                           ("disable", "block an account from signing in"),
+                           ("remove", "delete an account")):
+        p_cmd = u.add_parser(cmd, help=help_text)
+        p_cmd.add_argument("name")
     p_sum = sub.add_parser("summary", help="print the analytic model summary as JSON")
     p_sum.add_argument("project", help="path to project .json")
     p_bud = sub.add_parser("budget", help="estimate FLOPs / memory / latency on a device")
