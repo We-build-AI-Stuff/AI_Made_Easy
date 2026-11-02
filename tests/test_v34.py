@@ -555,4 +555,4 @@ def test_desktop_a_moved_folded_card_reopens_where_it_was_moved(desk):
     assert card.folded
     assert canvas.set_group_collapsed(card, False)
     reopened = sorted(tuple(n.pos()) for n in canvas.group_members(card))
-    assert reopened == pytest.approx(sorted((x + 400, y + 250) for x, y in before.values()))
+    assert [val for pt in reopened for val in pt] == pytest.approx([val for pt in sorted([x + 400, y + 250] for x, y in before.values()) for val in pt])
