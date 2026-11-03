@@ -557,5 +557,5 @@ def test_desktop_a_moved_folded_card_reopens_where_it_was_moved(desk):
     reopened = sorted(tuple(n.pos()) for n in canvas.group_members(card))
     expected = sorted((x + 400, y + 250) for x, y in before.values())
     assert len(reopened) == len(expected)
-    for r, e in zip(reopened, expected):
+    for r, e in zip(reopened, expected, strict=False):
         assert r == pytest.approx(e)
