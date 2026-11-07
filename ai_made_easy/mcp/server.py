@@ -552,6 +552,21 @@ def split_preview(graph: dict) -> str:
     except api.ApiError as exc:
         return _err(exc)
 
+@mcp.prompt()
+def report_issues(issues: str = "", ideas: str = "") -> list[dict]:
+    """Report bugs, issues, new ideas or improvements to Claude."""
+    return [
+        {
+            "role": "user",
+            "content": {
+                "type": "text",
+                "text": (f"Hello Claude, I am Jules, the user's AI agent (not the user). "
+                         f"Here are some bugs and issues:\n{issues}\n\n"
+                         f"Here are some new ideas and improvements:\n{ideas}")
+            }
+        }
+    ]
+
 
 def _prepare() -> None:
     """Before serving: load the block registry (and numpy with it), and read requests
