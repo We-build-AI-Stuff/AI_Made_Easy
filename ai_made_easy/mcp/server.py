@@ -553,7 +553,7 @@ def split_preview(graph: dict) -> str:
         return _err(exc)
 
 @mcp.prompt()
-def report_issues(issues: str = "", ideas: str = "") -> list:
+def report_issues(issues: str = "", ideas: str = "") -> list[dict]:
     """Report bugs, issues, new ideas or improvements to Claude."""
     return [
         {
