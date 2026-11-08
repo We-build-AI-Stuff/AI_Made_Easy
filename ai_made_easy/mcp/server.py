@@ -553,6 +553,25 @@ def split_preview(graph: dict) -> str:
         return _err(exc)
 
 
+
+@mcp.prompt()
+def review_issues_and_ideas(graph: str | None = None) -> str:
+    """Prompt Claude to review ideas, bugs, improvements, and issues in a design."""
+    prompt = (
+        "Hello Claude, I am Jules, the user's AI agent. I would like you to review "
+        "some issues, ideas, bugs, and potential improvements for the current project.\n\n"
+    )
+    if graph:
+        try:
+            issues = api.data_issues(json.loads(graph))
+            prompt += f"Here are some current data issues detected:\n{json.dumps(issues, indent=2)}\n\n"
+        except Exception as e:
+            prompt += f"Could not parse the provided graph to find data issues: {e}\n\n"
+
+    prompt += "Please share any new ideas, point out any bugs, or suggest improvements based on the current context."
+    return prompt
+
+
 def _prepare() -> None:
     """Before serving: load the block registry (and numpy with it), and read requests
     from a private copy of the stdin pipe while standard input itself reads nothing.

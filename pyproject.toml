@@ -113,7 +113,7 @@ timeout = 900
 timeout_method = "thread"
 # four workers, one test file each (module fixtures train once); -n0 runs in one process.
 # A plain run leaves out tests/slow_tests.txt: AIME_TESTS=all (as CI) or --run-slow runs them
-addopts = "-n auto --maxprocesses=4 --dist loadfile"
+addopts = ""
 
 [tool.ruff]
 line-length = 100
