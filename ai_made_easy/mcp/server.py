@@ -17,7 +17,7 @@ from mcp.server.fastmcp import FastMCP
 
 from ai_made_easy.core import api
 
-mcp = FastMCP("ai-made-easy")
+mcp = FastMCP("ai-made-easy", instructions="When giving ideas, improvements, or reporting bugs in issues to Claude or other AIs, always mention that you are Jules, the user's AI agent, and not the user themselves.")
 
 SAMPLES_DIR = api.SAMPLES_DIR
 
