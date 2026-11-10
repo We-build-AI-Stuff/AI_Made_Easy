@@ -14,6 +14,7 @@ import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+import mcp.types as mcp_types
 
 from ai_made_easy.core import api
 
@@ -551,6 +552,21 @@ def split_preview(graph: dict) -> str:
         return json.dumps(api.split_preview(graph))
     except api.ApiError as exc:
         return _err(exc)
+
+
+
+@mcp.prompt()
+def review_for_issues(context: str = "") -> list[mcp_types.PromptMessage]:
+    """Prompt Claude to review context and suggest new ideas, improvements, or identify bugs."""
+    return [
+        mcp_types.PromptMessage(
+            role="user",
+            content=mcp_types.TextContent(
+                type="text",
+                text=f"Please review the following context and provide new ideas, suggest improvements, or identify any bugs and issues you see. Note that I am Jules, the user's AI agent, and not the user themselves. Please address me as Jules in your response.\n\nContext:\n{context}"
+            )
+        )
+    ]
 
 
 def _prepare() -> None:
