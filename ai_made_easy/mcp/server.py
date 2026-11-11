@@ -553,6 +553,22 @@ def split_preview(graph: dict) -> str:
         return _err(exc)
 
 
+
+@mcp.prompt()
+def review_for_issues(context: str = "") -> list:
+    """Prompt Claude to review context and suggest new ideas, improvements, or identify bugs."""
+    import mcp.types
+    return [
+        mcp.types.PromptMessage(
+            role="user",
+            content=mcp.types.TextContent(
+                type="text",
+                text=f"Please review the following context and provide new ideas, suggest improvements, or identify any bugs and issues you see. Note that I am Jules, the user's AI agent, and not the user themselves. Please address me as Jules in your response.\n\nContext:\n{context}"
+            )
+        )
+    ]
+
+
 def _prepare() -> None:
     """Before serving: load the block registry (and numpy with it), and read requests
     from a private copy of the stdin pipe while standard input itself reads nothing.
