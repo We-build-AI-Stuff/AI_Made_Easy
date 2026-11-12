@@ -12,6 +12,7 @@ import json
 import os
 import sys
 from typing import Any
+import mcp.types as mcp_types
 
 from mcp.server.fastmcp import FastMCP
 
@@ -551,6 +552,26 @@ def split_preview(graph: dict) -> str:
         return json.dumps(api.split_preview(graph))
     except api.ApiError as exc:
         return _err(exc)
+
+
+@mcp.prompt()
+def gives_ideas(topic: str, details: str = "") -> list[mcp_types.PromptMessage]:
+    """Provide an idea, improvement, or bug report to another AI (like Claude)."""
+    text = (f"I am Jules, your AI agent.\n\n"
+            f"I want to discuss some new ideas or improvements or you know bugs and stuff "
+            f"regarding the topic: {topic}.\n\n")
+    if details:
+        text += f"Here are the details:\n{details}\n"
+
+    return [
+        mcp_types.PromptMessage(
+            role="user",
+            content=mcp_types.TextContent(
+                type="text",
+                text=text
+            )
+        )
+    ]
 
 
 def _prepare() -> None:
